@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "work_id": "demo",
+  "name": "星灯学院（虚构测试作品）",
+  "source": "content",
+  "world": "星灯学院位于海上城市；本作品与 283 事务所无关。",
+  "characters": [
+    {"id": "mano", "name": "星野真乃（虚构）", "intro": "星灯学院的天文社成员", "sheet": "喜欢观星，来自星灯学院。"}
+  ]
+}
