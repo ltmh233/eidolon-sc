@@ -11,7 +11,8 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
   const { search } = new URL(request.url);
   const url = `${BACKEND_URL}/api/${path.map(encodeURIComponent).join("/")}${search}`;
   const headers = new Headers();
-  for (const name of ["content-type", "cookie", "origin", "x-timezone", "if-none-match"]) {
+  // The Go gateway must see explicit work scope to reject DLC requests on legacy SC routes.
+  for (const name of ["content-type", "cookie", "origin", "x-timezone", "x-work-id", "if-none-match"]) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
@@ -22,6 +23,9 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
     headers,
     body: hasBody ? request.body : undefined,
     duplex: "half", // a stream as the body, sent while it is still being read
+    // Next aborts this signal on disconnect, including before upstream headers arrive.
+    // Passing it also opts out of Next's GET deduplication and its tee'd response body.
+    signal: request.signal,
     cache: "no-store",
     redirect: "manual", // the browser follows the backend's redirects itself
   };

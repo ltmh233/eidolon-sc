@@ -27,7 +27,7 @@ go build -trimpath -o /tmp/eidolon-core ./cmd/eidolon-core
 | `POST /api/works/demo/conversations` 等 | 405；本阶段仅目录读取 |
 | 原 `/api/*` | 流式转发 Python，原有认证、Origin、Cookie、错误码、头像 URL 保留 |
 
-新 API 不把裸角色 ID 当全局身份。`display.id` / `local_id` 是显示或兼容元数据，不得拿 `demo` 的 `local_id` 调旧 SC 聊天接口。旧路由省略作品作用域表示 SC；query/header 显式指定非 SC 会返回 409。创建对话和 offer JSON 中显式的 `work_id`（含 offer 的 `requestData`）也会检查；这两种请求上限 1 MiB。数据包导入等大请求仍流式转发。未修改 Python 直连端口，所以该端口仍需保持私网。
+新 API 不把裸角色 ID 当全局身份。`display.id` / `local_id` 是显示或兼容元数据，不得拿 `demo` 的 `local_id` 调旧 SC 聊天接口。旧路由省略作品作用域表示 SC；query/header 显式指定非 SC 会返回 409。创建对话和 offer JSON 中显式的 `work_id`（含 offer 的 `requestData`）也会检查；这两种请求上限 1 MiB。文字回合 JSON 的 `work_id` 由 Python 输入边界检查，省略或 `sc` 照常执行，其他值返回 409，发生在调用模型、扣额度和写历史之前。Go 不为文字回合新增请求缓冲或大小限制，数据包导入等大请求仍流式转发。Python 直连端口仍需保持私网。
 
 内容包格式见 `testdata/packs/demo/work.json`。schema v1 支持 `schema_version`、`work_id`、`name`、`source`、`world`、`characters`；每位角色有 `id`、`name`、`intro`、`sheet`。新作品 `source` 必须为 `content`。ID 限小写字母、数字、下划线与短横线，重复作品、同作品重复角色、缺少人设/世界设定、未知字段或不支持的 schema 均使启动失败。每包最多 2 MiB。目录按作品 ID 排序；角色保持包内顺序。重启时加载快照，无热重载；内容包属于可信部署输入，不能让用户上传任意目录。
 

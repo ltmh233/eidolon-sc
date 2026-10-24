@@ -100,6 +100,8 @@ class NewConversation(BaseModel):
 
 class TurnInput(BaseModel):
     text: str
+    work_id: object = "sc"
+    """Legacy turns only run in SC; retain explicit scope so the route can reject it."""
     own_keys: OwnKeysInput | None = None
     """The user's own keys, which their browser keeps, for the turn to run on; the shape
     calls bring too. A turn uses only the LLMs and image generation, voice keys brought
@@ -617,6 +619,8 @@ def create_app(backend: Backend) -> FastAPI:
         user_id: UserId,
         device_timezone: DeviceTimezone = None,
     ) -> StreamingResponse:
+        if body.work_id != "sc":
+            raise HTTPException(409, "legacy API supports sc only")
         conversation = await conversation_or_404(conversation_id, user_id)
         if body.own_llm is not None:  # transitional: see `TurnInput.own_llm`
             raise HTTPException(422, "页面已经更新，请刷新后再发")

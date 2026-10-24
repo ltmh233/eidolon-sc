@@ -1,0 +1,19 @@
+# Opt-in LOCAL overlay only. Do not combine with docker-compose.prod.yml.
+# docker compose -f docker-compose.yml -f docker-compose.dlc.yml up --build
+services:
+  core:
+    build: ./core
+    command: ["-listen", "0.0.0.0:8081", "-packs", "/packs,/test-packs", "-legacy", "http://backend:8000"]
+    volumes:
+      - ./core/testdata/packs:/test-packs:ro
+    environment:
+      GOMEMLIMIT: 64MiB
+      GOMAXPROCS: "2"
+    mem_limit: 96m
+    restart: unless-stopped
+  frontend:
+    environment:
+      BACKEND_URL: http://core:8081
+    depends_on:
+      - backend
+      - core

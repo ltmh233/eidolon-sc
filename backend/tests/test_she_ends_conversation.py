@@ -29,7 +29,7 @@ import httpx
 import pytest
 
 from eidolon.config import Settings, UsageLimits
-from tests.browser import TIMEOUT, open_browser
+from tests.browser import TIMEOUT, open_browser, until_gone
 from tests.conftest import ClientFactory
 from tests.fakes import (
     FAKE_JUDGE,
@@ -378,11 +378,12 @@ async def test_a_call_in_it_as_she_ends_it_she_hangs_up_telling_it_she_ended_it(
     conversation = await start_conversation(client)
 
     async with open_browser() as browser:
-        await browser.call(client, conversation_id=conversation)
+        call = await browser.call(client, conversation_id=conversation)
         await browser.connect()
         typed = await say_each(client, conversation, 2)
         ended = await browser.next_server_message("ended")
         await browser.hung_up()
+    await until_gone(client, call.json()["pc_id"])  # peerLeft precedes the call's settlement
     recorded = await record(client, conversation)
 
     assert ended_by(typed[-1])

@@ -19,6 +19,32 @@ describe("forwarding /api/* to the backend", () => {
     vi.unstubAllGlobals();
   });
 
+  it("cancels a pending upstream fetch when the downstream request aborts", async () => {
+    const controller = new AbortController();
+    const entered = Promise.withResolvers<void>();
+    vi.stubGlobal("fetch", vi.fn((_url: string, init: RequestInit) => {
+      entered.resolve();
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      });
+    }));
+    const request = new Request("http://localhost/api/stream", { signal: controller.signal });
+    const response = GET(request, { params: Promise.resolve({ path: ["stream"] }) });
+    const rejected = expect(response).rejects.toMatchObject({ name: "AbortError" });
+    await entered.promise;
+    controller.abort();
+    await rejected;
+  }, 1000);
+
+  it("uses the downstream signal without disturbing a normally completed response", async () => {
+    const request = new Request("http://localhost/api/stream");
+    const fetch = backendAnswers(() => new Response("data: first\n\ndata: done\n\n"));
+    const response = await GET(request, { params: Promise.resolve({ path: ["stream"] }) });
+    expect(fetch.mock.calls[0][1].signal).toBe(request.signal);
+    expect(await response.text()).toBe("data: first\n\ndata: done\n\n");
+    expect(request.signal.aborted).toBe(false);
+  });
+
   it("passes on what the browser needs to cache an avatar", async () => {
     backendAnswers(
       () =>
@@ -77,5 +103,23 @@ describe("forwarding /api/* to the backend", () => {
     expect(new Uint8Array(await new Response(sent.body).arrayBuffer())).toEqual(new Uint8Array([0x50, 0x4b, 0x03, 0x04]));
     expect(res.headers.get("content-disposition")).toBe('attachment; filename="eidolon-data-package-2026-10-19.zip"');
     expect(res.headers.get("content-length")).toBe("3");
+  });
+
+  it("keeps an explicit DLC scope so the Go gateway can refuse legacy SC writes", async () => {
+    const upstream = vi.fn(async (_url: string, init: RequestInit) => {
+      const scope = new Headers(init.headers).get("x-work-id");
+      return Response.json({}, { status: scope === "demo" ? 409 : 201 });
+    });
+    vi.stubGlobal("fetch", upstream);
+    const response = await POST(
+      new Request("http://localhost/api/conversations", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-work-id": "demo" },
+        body: JSON.stringify({ character_id: "mano" }),
+      }),
+      { params: Promise.resolve({ path: ["conversations"] }) },
+    );
+    expect(response.status).toBe(409);
+    expect(upstream).toHaveBeenCalledOnce();
   });
 });
