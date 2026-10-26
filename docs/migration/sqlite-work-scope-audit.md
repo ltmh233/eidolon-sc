@@ -82,3 +82,13 @@ SQLite 的 `sqlite_sequence` 是内部自增序列，不属于业务表，也不
 新增辅助表 `message_insert_guard(id INTEGER PRIMARY KEY)`，登记于 `NOT_USER_DATA`。它仅暂存本次 INSERT 前可能冲突的全局消息编号，没有正文、用户、作品或会话字段。BEFORE INSERT 清空并捕获冲突，AFTER INSERT 按实际分配的 ID 判定替换并 `RAISE(ABORT)` 回滚整条语句；普通插入清空辅助表。`OR IGNORE` 可能跳过 AFTER，下一次 BEFORE 会清理遗留状态。SQLite 单写者串行化与事务隔离保障该探针不被并发写入混用，不要求 `recursive_triggers` 开启。
 
 没有跳过负数 ID、重建 messages、重分配历史 ID 或取消父会话约束。新增表和探针触发器纳入启动校验，旧实验版 v1 不会被静默视为已修复；本阶段尚未部署，需从原 v0 合成库/匹配备份执行最终迁移，不在应用启动时修补旧实验版本。上文旧 schema 对象计数保留为原验收记录，不能作为此次最终对象数量。
+
+## 2026-10-27 记忆领域 v2 增量审计
+
+上文“记忆仍限 SC”描述第一条切片历史状态。本切片将 memories 改为显式用户/作品所有权，新增 work_id、UNIQUE(user_id,work_id,text)、memories_by_scope；来源会话、取代关系均由 SQL 约束为同用户同作品。记忆 ID、作品和用户不可 UPDATE/REPLACE 改挂。辅助 memory_insert_guard 只捕获候选冲突 ID，已登记 NOT_USER_DATA；它处理自动编号 -1 哨兵与真实负数 ID 的区别。
+
+memory_vectors 保留原字段和 BLOB，通过 memory_id 父记忆继承作品；所有候选及再嵌入查询按作品限定，父用户校验和向量身份触发器拒绝改挂。删除记忆会清除其向量并修复取代链，整作品 clear 只影响绑定作用域；全局账号删除仍覆盖所有作品。表重建不迁移好感度/礼物/任务/成就/剧情缓存。
+
+数据包 read_kept/add_carried、旧记忆 HTTP、SC 引擎以及维护 reembed 均显式走 SC 适配；reembed 不会处理或删除 Demo 向量。新关键词入口是作用域 SQL 的字面匹配，不是新增全局 FTS 服务。真实三进程夹具从冻结 v1 记忆库升级，验证原 SC 记忆进入模型提示词而 Demo 文本不进入。
+
+新版本门禁、v1/v0 迁移范围、异常 Schema 拒绝与首次失败记录见 [第二条切片报告](memory-work-scope-second-slice.md)。原统计及原始失败日志保留，不覆盖历史结果。

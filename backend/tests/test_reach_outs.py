@@ -385,8 +385,8 @@ def remember(
     """Have the producer have told `told` `text` at `at`, as a turn writes it down: its id."""
     with sqlite3.connect(database) as db:
         cursor = db.execute(
-            "INSERT INTO memories (user_id, source_character_id, text, created_at, superseded_by)"
-            " VALUES ((SELECT id FROM users WHERE name = 'producer'), ?, ?, ?, ?)",
+            "INSERT INTO memories (user_id, work_id, source_character_id, text, created_at, superseded_by)"
+            " VALUES ((SELECT id FROM users WHERE name = 'producer'), 'sc', ?, ?, ?, ?)",
             (told, text, at.isoformat(), superseded_by),
         )
     assert cursor.lastrowid is not None

@@ -254,10 +254,19 @@ async def test_a_database_that_cannot_be_copied_whole_is_not_uploaded(
     deployment: Deployment, tmp_path: Path
 ):
     await users_in(deployment.database, *(f"user {n:03d} " + "x" * 200 for n in range(500)))
-    middle = deployment.database.stat().st_size // 2 // 4096 * 4096
+    # Schema growth moves pages: target the users B-tree, not an arbitrary middle
+    # page that may now be unused space and leave the database perfectly readable.
+    with sqlite3.connect(deployment.database) as db:
+        assert db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+        page_size = db.execute("PRAGMA page_size").fetchone()[0]
+        root = db.execute("SELECT rootpage FROM sqlite_master WHERE name='users'").fetchone()[0]
+    middle = (root - 1) * page_size
     with deployment.database.open("r+b") as file:  # break a page among the users
         file.seek(middle)
         file.write(b"\xff" * 200)
+    with sqlite3.connect(deployment.database) as db:
+        with pytest.raises(sqlite3.DatabaseError):
+            db.execute("SELECT id,name FROM users NOT INDEXED").fetchall()
     old = deployment.keep(START - timedelta(days=31))
     deployment.keep(START - timedelta(days=1))
 

@@ -1,7 +1,7 @@
-"""Explicit offline v0 -> v1 migration. Python remains the only SQLite writer.
+"""Explicit offline v0/v1 -> v2 migration. Python remains the only SQLite writer.
 
-The version covers the conversation identity contract; module-owned SC tables retain
-existing layouts. No application startup upgrades a pre-existing conversation table.
+The version covers conversation and memory scope contracts; other module-owned SC
+tables retain their layouts. Existing databases are never upgraded at startup.
 """
 import argparse
 import hashlib
@@ -14,7 +14,7 @@ from pathlib import Path
 
 from eidolon.database import connect, tables
 
-VERSION = 1
+VERSION = 2
 IDENTIFIER = re.compile(r"[a-z0-9_-]+\Z")
 CONVERSATION_COLUMNS = {"id", "user_id", "character_id", "created_at", "title"}
 TRIGGERS = {"conversation_scope_required", "conversation_identity_immutable",
@@ -52,6 +52,8 @@ def version(db: sqlite3.Connection) -> int:
 
 def require_ready(db: sqlite3.Connection) -> None:
     current = version(db)
+    if current == 1:
+        raise RuntimeError("legacy memory database requires offline migration and verified backup")
     if current not in (0, VERSION):
         raise RuntimeError("unsupported database schema version; use matching application/backup")
     if "conversations" not in tables(db):
@@ -65,6 +67,8 @@ def require_ready(db: sqlite3.Connection) -> None:
     views = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='view'")}
     if columns != CONVERSATION_COLUMNS | {"work_id"} or not TRIGGERS <= triggers or "sc_conversations" not in views or "message_insert_guard" not in tables(db):
         raise RuntimeError("invalid versioned conversation schema")
+    from eidolon.memory_schema import require_ready as require_memory
+    require_memory(db)
 
 
 def validate_legacy(db: sqlite3.Connection) -> None:
@@ -135,7 +139,9 @@ def _original_data(db: sqlite3.Connection, columns: dict[str, list[str]]) -> dic
         digest = hashlib.sha256()
         info = db.execute(f"PRAGMA table_info({_quoted(table)})").fetchall()
         primary = [r[1] for r in sorted(info, key=lambda r: r[5]) if r[5]]
-        order = ','.join(map(_quoted, primary)) or 'rowid'
+        # Rebuilding an AUTOINCREMENT table moves its internal sequence row;
+        # compare its named high-watermark, not sqlite_sequence's physical rowid.
+        order = 'name' if table == "sqlite_sequence" else ','.join(map(_quoted, primary)) or 'rowid'
         selected = ','.join(map(_quoted, names))
         for row in db.execute(f"SELECT {selected} FROM {_quoted(table)} ORDER BY {order}"):
             encoded = repr(tuple(row)).encode("utf-8")
@@ -173,12 +179,14 @@ def install(db: sqlite3.Connection, work_ids: tuple[str, ...] = ("sc",)) -> None
         BEGIN SELECT RAISE(ABORT, 'existing conversation cannot be replaced'); END""")
     db.execute(f"PRAGMA user_version={VERSION}")
     guard_sc_children(db)
+    from eidolon.memory_schema import install as install_memories
+    install_memories(db)
 
 
 def guard_sc_children(db: sqlite3.Connection) -> None:
     """Unmigrated business modules may only attach records to SC conversations."""
     present = tables(db)
-    for table in ("conversation_events", "photos", "calls", "reach_outs", "reach_out_schedules", "memories"):
+    for table in ("conversation_events", "photos", "calls", "reach_outs", "reach_out_schedules"):
         if table not in present:
             continue
         owner = " AND c.user_id=NEW.user_id" if table == "memories" else ""
@@ -230,7 +238,14 @@ def migrate(path: Path, backup: Path, work_ids: tuple[str, ...] = ("sc",)) -> di
             require_ready(db)
             check_integrity(db)
             return {"version": VERSION, "already_migrated": True}
-        validate_legacy(db)
+        previous = version(db)
+        if previous == 1:
+            triggers = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+            if not TRIGGERS <= triggers or "work_id" not in {r[1] for r in db.execute("PRAGMA table_info(conversations)")}:
+                raise RuntimeError("invalid v1 conversation schema")
+            check_integrity(db)
+        else:
+            validate_legacy(db)
         counts = {t: db.execute(f'SELECT count(*) FROM {_quoted(t)}').fetchone()[0]
                   for t in sorted(tables(db)) if not t.startswith("sqlite_")}
         columns = {t: [r[1] for r in db.execute(f"PRAGMA table_info({_quoted(t)})")] for t in counts}
@@ -253,9 +268,14 @@ def migrate(path: Path, backup: Path, work_ids: tuple[str, ...] = ("sc",)) -> di
             reader.close()
         with backup.open("rb") as saved:
             os.fsync(saved.fileno())
-        install(db, work_ids)
+        if previous == 1:
+            from eidolon.memory_schema import install as install_memories
+            install_memories(db)
+            db.execute(f"PRAGMA user_version={VERSION}")
+        else:
+            install(db, work_ids)
         require_ready(db)
-        if db.execute("SELECT 1 FROM conversations WHERE work_id IS NOT 'sc' LIMIT 1").fetchone():
+        if previous == 0 and db.execute("SELECT 1 FROM conversations WHERE work_id IS NOT 'sc' LIMIT 1").fetchone():
             raise RuntimeError("SC backfill verification failed")
         check_integrity(db)
         if _original_data(db, columns) != original:

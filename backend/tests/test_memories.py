@@ -622,9 +622,13 @@ async def test_writing_down_what_was_superseded_brings_it_back(
     assert OSAKA in section and TOKYO not in section
 
 
-async def test_memories_kept_before_superseding_all_hold(tmp_path: Path, world: World):
-    """A database from before superseding gains it on opening, every memory holding."""
-    with sqlite3.connect(tmp_path / "eidolon.db") as db:
+async def test_memories_kept_before_superseding_all_hold(tmp_path: Path, characters: CharacterConfig):
+    """Explicit offline upgrade keeps pre-superseding memories holding and recallable."""
+    from tests.test_work_schema import legacy
+    from eidolon.work_schema import migrate
+    path = tmp_path / "legacy-memory.db"
+    legacy(path)
+    with sqlite3.connect(path) as db:
         db.execute(
             "CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT,"
             " user_id TEXT NOT NULL REFERENCES users(id), source_character_id TEXT NOT NULL,"
@@ -634,9 +638,11 @@ async def test_memories_kept_before_superseding_all_hold(tmp_path: Path, world: 
         db.execute(
             "INSERT INTO memories (user_id, source_character_id, text, created_at)"
             " VALUES (?, 'mano', ?, ?)",
-            (world.producer, CAT, NOW.isoformat()),
+            ("u", CAT, NOW.isoformat()),
         )
-    db.close()
+    migrate(path, tmp_path / "backup.db")
+    database = Database(path)
+    world = World(database, Store(database), load_characters(characters.path), "u")
     memories = Memories(
         world.db, world.characters, lambda: NOW,
         embedder=FakeEmbedder(), reranker=FakeReranker("制作人"),
@@ -645,6 +651,7 @@ async def test_memories_kept_before_superseding_all_hold(tmp_path: Path, world: 
     [cat] = await memories.entries(world.producer)
     section = await find(memories, world, await world.conversation("kogane"), "你知道我家的猫吗？")
     await memories.aclose()
+    await database.close()
 
     assert (cat.text, cat.superseded_by) == (CAT, None)
     assert CAT in section

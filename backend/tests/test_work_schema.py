@@ -171,7 +171,7 @@ async def test_full_schema_integrity_and_audit(make_client, settings):
         definitions = db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").fetchall()
         if destination := os.environ.get("EIDOLON_SCHEMA_AUDIT"):
             Path(destination).write_text(json.dumps(definitions, ensure_ascii=False, indent=2))
-        print(f"SCHEMA version=1 objects={len(definitions)} integrity=ok foreign_keys=0")
+        print(f"SCHEMA version=2 objects={len(definitions)} integrity=ok foreign_keys=0")
 
 
 def test_existing_trigger_cannot_silently_change_history(tmp_path):
@@ -197,7 +197,7 @@ def test_unknown_version_and_broken_current_schema_refuse_startup(tmp_path):
     with pytest.raises(RuntimeError, match="unsupported"):
         Database(path)
     with sqlite3.connect(path) as db:
-        db.execute("PRAGMA user_version=1")
+        db.execute("PRAGMA user_version=2")
         db.execute("DROP VIEW sc_conversations")
     with pytest.raises(RuntimeError, match="invalid"):
         Database(path)

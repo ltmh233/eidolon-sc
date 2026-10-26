@@ -3,8 +3,8 @@
 After each turn the background model reads the exchange and writes down, in Chinese,
 whatever the user revealed about themselves that is worth keeping. Each memory belongs
 to the user and names the character it was told to, its source character. All of a
-user's characters share their memories, and a character finding one told to someone
-else is asked to pass it on as hearsay (ADR-0002); users never share theirs.
+user's characters within one work share their memories, and a character finding one told to someone
+else is asked to pass it on as hearsay (ADR-0002); users and works never share theirs.
 
 A turn goes `begin` → `candidates` → `find` → `write_down`. The turn's query (see
 `memory_query`) is embedded once, by whoever takes the turn (`retrieval`), and the vector
@@ -43,6 +43,8 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
+from weakref import WeakKeyDictionary
+from typing import Any
 
 from eidolon.activity import detached
 from eidolon.characters import Character
@@ -79,30 +81,13 @@ MAX_LATEST = 5
 ANOTHER_IDOL = "事务所的另一位偶像"
 """Who a memory was told to, when that character has been removed from the configuration."""
 
-# `memories` predates this module and keeps the columns and constraints it had in the
-# store; `memory_vectors` holds each memory's embedding, per embedding model.
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL REFERENCES users(id),
-    source_character_id TEXT NOT NULL,
-    conversation_id TEXT REFERENCES conversations(id),
-    text TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    superseded_by INTEGER,
-    UNIQUE (user_id, text)
-);
--- Deleting a conversation clears this from the memories written down in it.
-CREATE INDEX IF NOT EXISTS memories_by_conversation ON memories(conversation_id);
-CREATE TABLE IF NOT EXISTS memory_vectors (
-    memory_id INTEGER NOT NULL,
-    user_id TEXT NOT NULL,
-    model TEXT NOT NULL,
-    embedding BLOB NOT NULL,
-    PRIMARY KEY (memory_id, model)
-);
-CREATE INDEX IF NOT EXISTS memory_vectors_by_user ON memory_vectors(user_id, model);
-"""
+@dataclass
+class _Tasks:
+    pending: dict[tuple[str, str], set[asyncio.Task[None]]]
+    clearings: dict[tuple[str, str], int]
+
+
+_TASKS: WeakKeyDictionary[Database, _Tasks] = WeakKeyDictionary()
 
 
 @dataclass(frozen=True)
@@ -143,6 +128,11 @@ class CarriedMemory:
 
 
 def add_carried(db: sqlite3.Connection, user_id: str, carried: Sequence[CarriedMemory]) -> int:
+    """Legacy data packages are explicitly SC-only."""
+    return _add_carried(db, user_id, "sc", carried)
+
+
+def _add_carried(db: sqlite3.Connection, user_id: str, work_id: str, carried: Sequence[CarriedMemory]) -> int:
     """Add the memories `carried` to the user's through `db`, in the caller's transaction;
     returns how many were new. One whose text the user already has is not added again; what
     supersedes it, or what it says supersedes it, is the one already here. The new ones are
@@ -153,16 +143,16 @@ def add_carried(db: sqlite3.Connection, user_id: str, carried: Sequence[CarriedM
     new: list[CarriedMemory] = []
     for memory in carried:
         kept = db.execute(
-            "SELECT id FROM memories WHERE user_id = ? AND text = ?", (user_id, memory.text)
+            "SELECT id FROM memories WHERE user_id = ? AND work_id = ? AND text = ?", (user_id, work_id, memory.text)
         ).fetchone()
         if kept is not None:
             ids[memory.key] = kept[0]
             continue
         cursor = db.execute(
             "INSERT INTO memories"
-            " (user_id, source_character_id, conversation_id, text, created_at)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (user_id, memory.source_character_id, memory.conversation_id, memory.text,
+            " (user_id, work_id, source_character_id, conversation_id, text, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, work_id, memory.source_character_id, memory.conversation_id, memory.text,
              memory.created_at),
         )
         assert cursor.lastrowid is not None
@@ -188,7 +178,7 @@ class _Services:
     min_relevance: Callable[[], float]
 
 
-class Memories:
+class _ScopedMemories:
     """Every user's memories."""
 
     label = "记忆"
@@ -200,6 +190,7 @@ class Memories:
         characters: Mapping[str, Character],
         clock: Clock,
         *,
+        work_id: str,
         embedder: Embedder | None = None,
         reranker: Reranker | None = None,
         min_relevance: Callable[[], float] = lambda: DEFAULT_THRESHOLDS.memories,
@@ -210,6 +201,11 @@ class Memories:
         it is found is not (see `rerank.KNOWN_THRESHOLDS`)."""
         self._db = db
         db.prepare(_open)
+        def registered(connection):
+            if not connection.execute("SELECT 1 FROM work_scopes WHERE id=?", (work_id,)).fetchone():
+                raise ValueError("explicit registered work required")
+        db.prepare(registered)
+        self._work = work_id
         self._characters = characters
         self._clock = clock
         self._embedder = embedder
@@ -218,8 +214,9 @@ class Memories:
             if embedder is not None and reranker is not None
             else None
         )
-        self._pending: dict[str, set[asyncio.Task[None]]] = {}  # user id → writing
-        self._clearings: dict[str, int] = {}  # user id → how many times cleared
+        state = _TASKS.setdefault(db, _Tasks({}, {}))
+        self._pending = state.pending
+        self._clearings = state.clearings
 
     async def begin(
         self,
@@ -231,7 +228,12 @@ class Memories:
         """Begin a turn of `conversation`, whose user is in `timezone`, once what their
         earlier turns are writing down is written (a while at most). The turn writes down
         with `llm`, held on to with `hold` (see `TurnLLMs.hold_background`) until written."""
-        clearings = self._clearings.get(conversation.user_id, 0)
+        def validate(db):
+            parent = db.execute("SELECT user_id,work_id,character_id FROM conversations WHERE id=?", (conversation.id,)).fetchone()
+            if parent is None or tuple(parent) != (conversation.user_id, self._work, conversation.character_id):
+                raise ValueError("conversation outside memory scope")
+        await self._db.read(validate)
+        clearings = self._clearings.get((conversation.user_id, self._work), 0)
         await self._settle(conversation.user_id)
         return MemoryTurn(self, conversation, timezone, clearings, llm, hold)
 
@@ -245,20 +247,24 @@ class Memories:
     async def delete(self, user_id: str, memory_id: int) -> bool:
         """Forget one of the user's memories; False if they have no such memory."""
         await self._settle(user_id)
-        return await self._db.write(_delete, user_id, memory_id)
+        return await self._db.write(_delete, user_id, self._work, memory_id)
 
     async def clear(self, user_id: str) -> None:
         """Forget all of the user's memories, including those their turns so far are still
         writing down."""
-        self._clearings[user_id] = self._clearings.get(user_id, 0) + 1
+        self._clearings[(user_id, self._work)] = self._clearings.get((user_id, self._work), 0) + 1
         await self._settle(user_id)
-        await self._db.write(_clear, user_id)
+        await self._db.write(_clear, user_id, self._work)
 
     async def forget(self, user_id: str) -> None:
-        """Drop whatever the user's turns so far are still writing down, before the user
-        is deleted (see `database.delete_user_data`, which deletes their memories)."""
-        self._clearings[user_id] = self._clearings.get(user_id, 0) + 1
-        await self._settle(user_id)
+        """Global account deletion invalidates pending work in every work scope."""
+        keys = {key for key in self._pending if key[0] == user_id} | {key for key in self._clearings if key[0] == user_id}
+        keys.add((user_id, self._work))
+        for key in keys:
+            self._clearings[key] = self._clearings.get(key, 0) + 1
+        tasks = {task for key in keys for task in self._pending.get(key, ())}
+        if tasks:
+            await asyncio.wait(tasks, timeout=SETTLE_TIMEOUT)
 
     async def embed_missing(
         self,
@@ -276,11 +282,11 @@ class Memories:
         done = 0
         after = 0
         while True:
-            rows = await self._db.read(_unembedded, after, user_id, model, batch)
+            rows = await self._db.read(_unembedded, self._work, after, user_id, model, batch)
             if not rows:
                 return done
             vectors = await embedder.embed_documents([Document(text) for _, _, text in rows])
-            await self._db.write(_store_embedded, model, [
+            await self._db.write(_store_embedded, self._work, model, [
                 (id, user_id, to_blob(v))
                 for (id, user_id, _), v in zip(rows, vectors, strict=True)
             ])
@@ -311,7 +317,7 @@ class Memories:
     async def forget_other_models(self) -> int:
         """Drop every memory's vector not from the embedder given; returns how many there
         were."""
-        return await self._db.write(_forget_other_models, self._reembedder().model)
+        return await self._db.write(_forget_other_models, self._work, self._reembedder().model)
 
     def _reembedder(self) -> Embedder:
         """The embedder given, which embedding the memories again needs."""
@@ -319,9 +325,10 @@ class Memories:
             raise RuntimeError("embedding memories again needs the embedder they were opened with")
         return self._embedder
 
-    async def aclose(self) -> None:
+    async def aclose(self, *, user_id: str | None = None) -> None:
         """Let whatever is being written down finish, a while at most, then give up on it."""
-        tasks = {t for pending in self._pending.values() for t in pending}
+        tasks = {t for (owner, work), pending in self._pending.items()
+                 if work == self._work and (user_id is None or owner == user_id) for t in pending}
         if tasks:
             _, unfinished = await asyncio.wait(tasks, timeout=SETTLE_TIMEOUT)
             for task in unfinished:
@@ -329,7 +336,7 @@ class Memories:
             await asyncio.gather(*unfinished, return_exceptions=True)
 
     async def _settle(self, user_id: str) -> None:
-        if pending := self._pending.get(user_id):
+        if pending := self._pending.get((user_id, self._work)):
             await asyncio.wait(set(pending), timeout=SETTLE_TIMEOUT)
 
     async def _candidates(self, user_id: str, query_vector: Sequence[float]) -> list[Memory]:
@@ -348,7 +355,10 @@ class Memories:
         query_text: str,
         candidates: Sequence[Memory],
     ) -> str | None:
-        found = await self._relevant(query_text, candidates)
+        # Resolve candidate IDs inside this scope again; never pass caller-supplied
+        # foreign text to the reranker, including candidates retained across a clear.
+        allowed = {m.id: m for m in await self.kept(conversation.user_id) if m.superseded_by is None}
+        found = await self._relevant(query_text, [allowed[m.id] for m in candidates if m.id in allowed])
         character = self._characters[conversation.character_id]
         return _memories_prompt(found, character, timezone, _FOUND) if found else None
 
@@ -471,13 +481,13 @@ class Memories:
 
     def _hold(self, user_id: str, task: asyncio.Task[None]) -> None:
         """Have the user's turns, listing and deleting wait (a while) for `task`."""
-        pending = self._pending.setdefault(user_id, set())
+        pending = self._pending.setdefault((user_id, self._work), set())
         pending.add(task)
 
         def done(task: asyncio.Task[None]) -> None:
             pending.discard(task)
-            if not pending and self._pending.get(user_id) is pending:
-                del self._pending[user_id]
+            if not pending and self._pending.get((user_id, self._work)) is pending:
+                del self._pending[(user_id, self._work)]
 
         task.add_done_callback(done)
 
@@ -511,7 +521,7 @@ class Memories:
                     len(answer), conversation.id,
                 )
                 return
-            if self._clearings.get(user_id, 0) != clearings:
+            if self._clearings.get((user_id, self._work), 0) != clearings:
                 return  # cleared since the turn began
             added = await self._db.write(self._add, conversation, written, shown, now)
         except Exception:
@@ -521,7 +531,7 @@ class Memories:
         try:
             if added:
                 model = services.embedder.model
-                stored = await self._db.read(_stored_vectors, user_id, model)
+                stored = await self._db.read(_stored_vectors, user_id, self._work, model)
                 await self._vectors(services.embedder, user_id, added, stored, forget=False)
         except EmbeddingError:
             log.warning("embedding new memories failed; they are embedded when searched",
@@ -536,8 +546,8 @@ class Memories:
         """What `kept` reads, read through `db`: for a data package too."""
         rows = db.execute(
             "SELECT id, user_id, source_character_id, text, created_at, superseded_by,"
-            " conversation_id FROM memories WHERE user_id = ? ORDER BY id",
-            (user_id,),
+            " conversation_id FROM memories WHERE user_id = ? AND work_id = ? ORDER BY id",
+            (user_id, self._work),
         ).fetchall()
         return [self._memory(*row) for row in rows]
 
@@ -546,7 +556,7 @@ class Memories:
     ) -> tuple[list[Memory], dict[int, bytes]]:
         """All of the user's memories, and their vectors stored for `model`, as they were at
         one moment."""
-        return self.read_kept(db, user_id), _stored_vectors(db, user_id, model)
+        return self.read_kept(db, user_id), _stored_vectors(db, user_id, self._work, model)
 
     def _memory(
         self, id: int, user_id: str, source_character_id: str, text: str, created_at: str,
@@ -575,23 +585,23 @@ class Memories:
         parent = db.execute(
             "SELECT user_id,work_id FROM conversations WHERE id=?", (conversation.id,)
         ).fetchone()
-        if parent is not None and tuple(parent) != (user_id, "sc"):
-            raise ValueError("memory requires its owner's SC conversation")
+        if parent is not None and tuple(parent) != (user_id, self._work):
+            raise ValueError("memory requires its owner/work conversation")
         created_at = now.astimezone(UTC).isoformat()
         for memory in written:
             kept = db.execute(
                 "SELECT id, superseded_by IS NOT NULL FROM memories"
-                " WHERE user_id = ? AND text = ?",
-                (user_id, memory.text),
+                " WHERE user_id = ? AND work_id = ? AND text = ?",
+                (user_id, self._work, memory.text),
             ).fetchone()
             if kept is None:
                 # Its conversation may have been deleted since the turn (GLOSSARY.md
                 # 「历史对话」): the memory is kept all the same, saying where no longer.
                 cursor = db.execute(
                     "INSERT INTO memories"
-                    " (user_id, source_character_id, conversation_id, text, created_at)"
-                    " VALUES (?, ?, (SELECT id FROM sc_conversations WHERE id = ?), ?, ?)",
-                    (user_id, conversation.character_id, conversation.id, memory.text,
+                    " (user_id, work_id, source_character_id, conversation_id, text, created_at)"
+                    " VALUES (?, ?, ?, (SELECT id FROM conversations WHERE id = ?), ?, ?)",
+                    (user_id, self._work, conversation.character_id, conversation.id, memory.text,
                      created_at),
                 )
                 assert cursor.lastrowid is not None
@@ -610,9 +620,9 @@ class Memories:
             # is left as it is.
             db.executemany(
                 "UPDATE memories SET superseded_by = ?"
-                " WHERE id = ? AND user_id = ? AND superseded_by IS NULL",
+                " WHERE id = ? AND user_id = ? AND work_id = ? AND superseded_by IS NULL",
                 [
-                    (id, shown[n - 1].id, user_id)
+                    (id, shown[n - 1].id, user_id, self._work)
                     for n in memory.supersedes
                     if 1 <= n <= len(shown) and shown[n - 1].id != id
                 ],
@@ -640,27 +650,23 @@ class Memories:
             stored.update(zip((m.id for m in missing), map(to_blob, embedded), strict=True))
         if missing or stale:
             await self._db.write(
-                _store_vectors, user_id, model, [(m.id, stored[m.id]) for m in missing],
+                _store_vectors, user_id, self._work, model, [(m.id, stored[m.id]) for m in missing],
                 stale,
             )
         return stored
 
 
 def _open(db: sqlite3.Connection) -> None:
-    from eidolon.work_schema import guard_sc_children
-    db.executescript(_SCHEMA)
-    guard_sc_children(db)
-    columns = {row[1] for row in db.execute("PRAGMA table_info(memories)")}
-    if "superseded_by" not in columns:  # kept from before superseding: all hold
-        db.execute("ALTER TABLE memories ADD COLUMN superseded_by INTEGER")
+    from eidolon.memory_schema import require_ready
+    require_ready(db)
 
 
-def _delete(db: sqlite3.Connection, user_id: str, memory_id: int) -> bool:
+def _delete(db: sqlite3.Connection, user_id: str, work_id: str, memory_id: int) -> bool:
     """Delete the memory, what it superseded superseded instead by what superseded it, or
     holding again if nothing did."""
     deleted = db.execute(
-        "SELECT superseded_by FROM memories WHERE id = ? AND user_id = ?",
-        (memory_id, user_id),
+        "SELECT superseded_by FROM memories WHERE id = ? AND user_id = ? AND work_id = ?",
+        (memory_id, user_id, work_id),
     ).fetchone()
     if deleted is None:
         return False
@@ -676,47 +682,46 @@ def _delete(db: sqlite3.Connection, user_id: str, memory_id: int) -> bool:
     return True
 
 
-def _clear(db: sqlite3.Connection, user_id: str) -> None:
-    db.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
-    db.execute("DELETE FROM memory_vectors WHERE user_id = ?", (user_id,))
+def _clear(db: sqlite3.Connection, user_id: str, work_id: str) -> None:
+    db.execute("DELETE FROM memories WHERE user_id = ? AND work_id = ?", (user_id, work_id))
 
 
 def _unembedded(
-    db: sqlite3.Connection, after: int, user_id: str | None, model: str, batch: int
+    db: sqlite3.Connection, work_id: str, after: int, user_id: str | None, model: str, batch: int
 ) -> list[tuple[int, str, str]]:
     """As many as `batch` of every user's memories, or only those of `user_id`, after the
     id `after`, with no vector for `model`: each one's id, user and text."""
     return db.execute(
-        "SELECT id, user_id, text FROM memories m WHERE id > ?"
+        "SELECT id, user_id, text FROM memories m WHERE id > ? AND work_id = ?"
         " AND (? IS NULL OR user_id = ?) AND NOT EXISTS"
         " (SELECT 1 FROM memory_vectors v WHERE v.memory_id = m.id AND v.model = ?)"
         " ORDER BY id LIMIT ?",
-        (after, user_id, user_id, model, batch),
+        (after, work_id, user_id, user_id, model, batch),
     ).fetchall()
 
 
 def _store_embedded(
-    db: sqlite3.Connection, model: str, embedded: Sequence[tuple[int, str, bytes]]
+    db: sqlite3.Connection, work_id: str, model: str, embedded: Sequence[tuple[int, str, bytes]]
 ) -> None:
     """Store the vectors for `model` of the memories `embedded`, each with its user, but of
     those deleted meanwhile."""
     db.executemany(
         "INSERT OR REPLACE INTO memory_vectors (memory_id, user_id, model, embedding)"
-        " SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM memories WHERE id = ?)",
-        [(id, user_id, model, vector, id) for id, user_id, vector in embedded],
+        " SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM memories WHERE id = ? AND user_id = ? AND work_id = ?)",
+        [(id, user_id, model, vector, id, user_id, work_id) for id, user_id, vector in embedded],
     )
 
 
-def _forget_other_models(db: sqlite3.Connection, model: str) -> int:
-    return db.execute("DELETE FROM memory_vectors WHERE model != ?", (model,)).rowcount
+def _forget_other_models(db: sqlite3.Connection, work_id: str, model: str) -> int:
+    return db.execute("DELETE FROM memory_vectors WHERE model != ? AND memory_id IN (SELECT id FROM memories WHERE work_id=?)", (model, work_id)).rowcount
 
 
-def _stored_vectors(db: sqlite3.Connection, user_id: str, model: str) -> dict[int, bytes]:
+def _stored_vectors(db: sqlite3.Connection, user_id: str, work_id: str, model: str) -> dict[int, bytes]:
     """The vector of each of the user's memories stored for `model`."""
     return dict(
         db.execute(
-            "SELECT memory_id, embedding FROM memory_vectors WHERE user_id = ? AND model = ?",
-            (user_id, model),
+            "SELECT v.memory_id, v.embedding FROM memory_vectors v JOIN memories m ON m.id=v.memory_id AND m.user_id=v.user_id WHERE m.user_id = ? AND m.work_id = ? AND v.model = ?",
+            (user_id, work_id, model),
         ).fetchall()
     )
 
@@ -724,17 +729,89 @@ def _stored_vectors(db: sqlite3.Connection, user_id: str, model: str) -> dict[in
 def _store_vectors(
     db: sqlite3.Connection,
     user_id: str,
+    work_id: str,
     model: str,
     added: Sequence[tuple[int, bytes]],
     stale: Iterable[int],
 ) -> None:
     """Store the `added` vectors for `model`, but of memories deleted meanwhile, and forget
     those of the `stale` memories."""
-    _store_embedded(db, model, [(memory_id, user_id, vector) for memory_id, vector in added])
+    _store_embedded(db, work_id, model, [(memory_id, user_id, vector) for memory_id, vector in added])
     db.executemany(
         "DELETE FROM memory_vectors WHERE memory_id = ? AND model = ?",
         [(memory_id, model) for memory_id in stale],
     )
+
+
+class Memories(_ScopedMemories):
+    """Explicit SC adapter for existing HTTP, engine, data packages and CLI."""
+
+    def __init__(self, db: Database, characters: Mapping[str, Character], clock: Clock, **services: Any):
+        super().__init__(db, characters, clock, work_id="sc", **services)
+
+
+class WorkMemories:
+    """Internal owner/work-bound memory API; never registers works or opens chat."""
+
+    def __init__(self, db: Database, *, user_id: str, work_id: str,
+                 characters: Mapping[str, Character], clock: Clock, **services: Any):
+        from eidolon.work_schema import IDENTIFIER
+        if not user_id or not IDENTIFIER.fullmatch(work_id):
+            raise ValueError("explicit registered work and owner required")
+        self._user, self._work, self._db = user_id, work_id, db
+        self._service = _ScopedMemories(db, characters, clock, work_id=work_id, **services)
+
+    async def entries(self) -> list[Memory]:
+        return await self._service.entries(self._user)
+
+    async def add(self, text: str, source_character_id: str, conversation_id: str | None = None) -> int:
+        from eidolon.work_schema import IDENTIFIER
+        if not text or not IDENTIFIER.fullmatch(source_character_id):
+            raise ValueError("memory text and local source character required")
+        created = self._service._clock().astimezone(UTC).isoformat()
+        def write(db):
+            _add_carried(db, self._user, self._work, [CarriedMemory(
+                0, source_character_id, text, created, None, conversation_id,
+            )])
+            return db.execute("SELECT id FROM memories WHERE user_id=? AND work_id=? AND text=?",
+                              (self._user, self._work, text)).fetchone()[0]
+        return await self._db.write(write)
+
+    async def delete(self, memory_id: int) -> bool:
+        return await self._service.delete(self._user, memory_id)
+
+    async def clear(self) -> None:
+        await self._service.clear(self._user)
+
+    async def supersede(self, memory_id: int, replacement: int) -> bool:
+        def write(db):
+            return bool(db.execute("UPDATE memories SET superseded_by=? WHERE id=? AND user_id=? AND work_id=?",
+                                   (replacement, memory_id, self._user, self._work)).rowcount)
+        return await self._db.write(write)
+
+    async def keywords(self, query: str) -> list[Memory]:
+        """Literal keyword candidates, scoped in SQL before any reranking."""
+        def read(db):
+            rows = db.execute("SELECT id,user_id,source_character_id,text,created_at,superseded_by,conversation_id FROM memories WHERE user_id=? AND work_id=? AND superseded_by IS NULL AND instr(text,?)>0 ORDER BY id DESC LIMIT ?",
+                              (self._user, self._work, query, CANDIDATES)).fetchall()
+            return [self._service._memory(*row) for row in rows]
+        return await self._db.read(read)
+
+    async def search(self, query: str) -> list[Memory]:
+        service = self._service
+        if service._services is None:
+            return []
+        vector = await service._services.embedder.embed_query(query)
+        candidates = await service._candidates(self._user, vector)
+        return await service._relevant(query, candidates)
+
+    async def begin(self, conversation, timezone: str, llm: ChatLLM) -> "MemoryTurn":
+        if conversation.user_id != self._user or conversation.work_id != self._work:
+            raise ValueError("conversation outside memory scope")
+        return await self._service.begin(conversation, timezone, llm)
+
+    async def aclose(self) -> None:
+        await self._service.aclose(user_id=self._user)
 
 
 class MemoryTurn:
@@ -742,7 +819,7 @@ class MemoryTurn:
 
     def __init__(
         self,
-        memories: Memories,
+        memories: _ScopedMemories,
         conversation: Conversation,
         timezone: str,
         clearings: int,

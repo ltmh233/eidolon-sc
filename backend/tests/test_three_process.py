@@ -116,6 +116,11 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert info["migration"]["counts"]["messages"] == 1
             resumed = await client.post(f"/api/conversations/{info['history']}/turns", json={"text": "continue migrated history"})
             assert resumed.status_code == 200 and '"done"' in resumed.text
+            memories = await client.get("/api/memories")
+            assert memories.status_code == 200 and "制作人喜欢咖啡" in memories.text
+            assert "DEMO_SECRET_MEMORY" not in memories.text
+            assert (tmp_path / "memory-recalled").exists(), "historical SC memory missing from actual model prompt"
+            assert not (tmp_path / "memory-leaked").exists(), "foreign work memory reached model"
             for boundary, hidden_id in (("cross-work", info["hidden"]), ("cross-user", info["other"])):
                 assert (await client.get(f"/api/conversations/{hidden_id}/messages")).status_code == 404, (boundary, "GET messages")
                 assert (await client.delete(f"/api/conversations/{hidden_id}")).status_code == 404, (boundary, "DELETE")

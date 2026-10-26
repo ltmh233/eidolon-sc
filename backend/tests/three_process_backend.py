@@ -14,9 +14,9 @@ from eidolon.app import create_app
 from eidolon.config import LLMSettings, Settings
 from eidolon.work_schema import migrate
 from eidolon.work_conversations import WorkConversations
-from tests.test_work_schema import legacy
+from tests.test_work_memories import history
 from tests.conftest import github_identity
-from tests.fakes import FakeCatalog, FakeIdentityProvider, FakeLLM, FakeLLMService, FakeSpeech, build_faked
+from tests.fakes import FakeCatalog, FakeIdentityProvider, FakeLLM, FakeLLMService, FakeSpeech, FakeEmbedder, FakeReranker, FakeJudge, FakeClock, build_faked
 
 
 async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | None) -> None:
@@ -24,6 +24,10 @@ async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | 
 
     class ObservedLLM(FakeLLM):
         async def stream_with(self, key, messages, tools=(), *, forbid_calls=False):
+            if any(m.role == "system" and "制作人喜欢咖啡" in m.content for m in messages):
+                (directory / "memory-recalled").write_text("SC historical memory reached prompt")
+            if any("DEMO_SECRET_MEMORY" in m.content for m in messages):
+                (directory / "memory-leaked").write_text("unexpected foreign memory")
             if any(m.role == "user" and "cancel-stream" in m.content for m in messages):
                 try:
                     yield "<ja>はい。</ja><zh>好的。</zh>"
@@ -45,19 +49,22 @@ async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | 
         character_snapshot_path=snapshot, catalog_display_path=display,
         stand_assets_url=assets_url,
     )
-    legacy(settings.database_path)
+    history(settings.database_path)
     with sqlite3.connect(settings.database_path) as db:
-        db.execute("UPDATE conversations SET character_id='mano'")
         db.execute("INSERT INTO sign_in_methods VALUES ('u','github','1001','producer',NULL,'2020-01-01')")
     migration = migrate(settings.database_path, directory / "before.db", ("sc", "demo"))
     backend = build_faked(
         settings, ObservedLLM(*[["<ja>はい。</ja><zh>好的。</zh>"]] * 5),
         speech=FakeSpeech(), identity_providers={"github": github},
         own_llm_service=FakeLLMService(), catalog_transport=FakeCatalog().transport(),
+        embedder=FakeEmbedder(), reranker=FakeReranker(), retrieval_judge=FakeJudge(),
     )
     demo = WorkConversations(backend.database, user_id="u", work_id="demo")
     hidden = await demo.create("mano")
     await demo.append(hidden.id, "user", "other-work-private")
+    from eidolon.memory import WorkMemories
+    demo_memory = WorkMemories(backend.database, user_id="u", work_id="demo", characters={}, clock=FakeClock())
+    await demo_memory.add("DEMO_SECRET_MEMORY", "mano", hidden.id)
     other_user = await backend.store.create_user("other")
     other = await backend.store.create_conversation(other_user.id, "mano")
     app = create_app(backend)

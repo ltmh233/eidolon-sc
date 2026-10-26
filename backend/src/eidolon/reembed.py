@@ -1,4 +1,4 @@
-"""Embedding everything again after the embedding service, model or dimensions change
+"""Embedding SC content and memories again after the service, model or dimensions change
 (ADR-0005), from the text already in the database and the character configuration: the
 story corpus, the character facts, the work facts (songs, releases and live days, given
 a world setting; without one, their vectors are forgotten), and every user's memories. Nothing is downloaded or imported again. The
@@ -22,6 +22,7 @@ from eidolon.corpus import REEMBED_BATCH
 from eidolon.data_access import Database
 from eidolon.embedding import Embedder, Reembeddable
 from eidolon.memory import Memories
+from eidolon.store import Store
 from eidolon.retrieval import open_reference_sources
 from eidolon.world import World
 
@@ -66,8 +67,10 @@ async def reembed(
     by_id = {c.id: c for c in characters}
     # Passages missing vectors are what this is for; no need to warn of them.
     db = Database(path)
-    memories = Memories(db, by_id, utc_now, embedder=embedder)
+    memories = None
     try:
+        Store(db)  # Initialize an empty maintenance database through the versioned schema.
+        memories = Memories(db, by_id, utc_now, embedder=embedder)
         sources = open_reference_sources(db, embedder, by_id.values(), world, warn=False)
         everything: list[Reembeddable] = [*sources.embedded(), memories]
         embedded = []
@@ -77,7 +80,8 @@ async def reembed(
             embedded.append(EmbeddedCount(each.label, each.unit, count))
         forgotten = sum([await each.forget_other_models() for each in everything])
     finally:
-        await memories.aclose()
+        if memories is not None:
+            await memories.aclose()
         await db.close()
     return ReembedReport(tuple(embedded), forgotten)
 
