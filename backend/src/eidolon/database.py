@@ -85,7 +85,7 @@ NOT_USER_DATA = frozenset(
         "price_catalog_thinking", "price_catalog_hosts", "price_catalog_providers",
         "price_catalog_offers", "price_catalog_state", "banned_identities", "announcements",
         "sponsor", "gifts_opened", "reset_card_grants", "backup_runs", "record_rollups",
-        "taken_rollups", "call_rollups", "spread_rollups", "achievements_launched",
+        "taken_rollups", "call_rollups", "spread_rollups", "achievements_launched", "work_scopes", "message_insert_guard",
     }
 )
 """Every other table: the story corpus, the embedded text set, the calls to outside

@@ -26,6 +26,7 @@ from eidolon.database import (
 from eidolon.delivery_cues import without_cues
 from eidolon.producer import Birthday, ProducerProfile
 from eidolon.reply_format import Segment
+from eidolon.work_schema import execute_schema, install
 
 Role = Literal["user", "character"]
 EventKind = Literal["hung_up", "gift", "ended"]
@@ -165,7 +166,7 @@ CREATE TABLE IF NOT EXISTS banned_identities (
 """
 
 _CURRENT = (
-    "c.rowid = (SELECT n.rowid FROM conversations n"
+    "c.rowid = (SELECT n.rowid FROM sc_conversations n"
     " WHERE n.user_id = c.user_id AND n.character_id = c.character_id"
     " ORDER BY n.created_at DESC, n.rowid DESC LIMIT 1)"
 )
@@ -828,7 +829,10 @@ _REACH_OUT_COLUMNS = "id, ja, zh, segments, created_at"
 
 def _open(db: sqlite3.Connection) -> None:
     """Make the store's tables, and bring those an older version made up to date."""
-    db.executescript(_SCHEMA)
+    fresh = "conversations" not in tables(db)
+    execute_schema(db, _SCHEMA)
+    if fresh:
+        install(db)
     columns = _columns(db, "users")
     if "name" not in columns:
         # Before access keys, users had no name; the one default user keeps its id as name.
@@ -1147,14 +1151,14 @@ def write_profile(db: sqlite3.Connection, user_id: str, profile: ProducerProfile
 
 def _conversation(db: sqlite3.Connection, conversation_id: str) -> Conversation | None:
     row = by_name(db).execute(
-        "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+        "SELECT id,user_id,character_id,created_at,title FROM sc_conversations WHERE id = ?", (conversation_id,)
     ).fetchone()
     return Conversation(**row) if row else None
 
 
 def _conversations(db: sqlite3.Connection, user_id: str, character_id: str) -> list[Conversation]:
     rows = by_name(db).execute(
-        "SELECT * FROM conversations WHERE user_id = ? AND character_id = ?"
+        "SELECT id,user_id,character_id,created_at,title FROM sc_conversations WHERE user_id = ? AND character_id = ?"
         " ORDER BY created_at DESC, rowid DESC",
         (user_id, character_id),
     ).fetchall()
@@ -1163,8 +1167,8 @@ def _conversations(db: sqlite3.Connection, user_id: str, character_id: str) -> l
 
 def _insert_conversation(db: sqlite3.Connection, conversation: Conversation) -> None:
     db.execute(
-        "INSERT INTO conversations (id, user_id, character_id, created_at)"
-        " VALUES (?, ?, ?, ?)",
+        "INSERT INTO conversations (id, user_id, character_id, created_at, work_id)"
+        " VALUES (?, ?, ?, ?, 'sc')",
         (conversation.id, conversation.user_id, conversation.character_id,
          conversation.created_at),
     )
@@ -1181,12 +1185,15 @@ def _list_conversations(
 
 def _name_conversation(db: sqlite3.Connection, conversation_id: str, title: str) -> None:
     db.execute(
-        "UPDATE conversations SET title = ? WHERE id = ? AND title IS NULL",
+        "UPDATE conversations SET title = ? WHERE id = ? AND title IS NULL AND work_id = 'sc'",
         (title, conversation_id),
     )
 
 
 def _delete_conversation(db: sqlite3.Connection, conversation: Conversation) -> None:
+    existing = _conversation(db, conversation.id)
+    if existing is None or existing.user_id != conversation.user_id or existing.character_id != conversation.character_id:
+        raise NotFound("conversation outside SC owner scope")
     hers = _conversations(db, conversation.user_id, conversation.character_id)
     if hers[0].id == conversation.id:
         raise IsCurrent()
@@ -1199,7 +1206,7 @@ def read_whole_conversations(db: sqlite3.Connection, user_id: str) -> list[Whole
     photos, read one at a time (`Store.photo_image`)."""
     named = by_name(db)
     conversations = named.execute(
-        "SELECT * FROM conversations WHERE user_id = ? ORDER BY created_at, rowid",
+        "SELECT id,user_id,character_id,created_at,title FROM sc_conversations WHERE user_id = ? ORDER BY created_at, rowid",
         (user_id,),
     ).fetchall()
     return [
@@ -1221,7 +1228,7 @@ def read_whole_conversations(db: sqlite3.Connection, user_id: str) -> list[Whole
                     " p.status AS photo_status, p.reason AS photo_reason,"
                     " p.created_at AS photo_created_at, p.updated_at AS photo_updated_at"
                     " FROM messages m LEFT JOIN photos p ON p.message_id = m.id"
-                    " WHERE m.conversation_id = ? ORDER BY m.id",
+                    " WHERE m.conversation_id = ? AND m.conversation_id IN (SELECT id FROM sc_conversations) ORDER BY m.id",
                     (c["id"],),
                 ).fetchall()
             ],
@@ -1232,7 +1239,7 @@ def read_whole_conversations(db: sqlite3.Connection, user_id: str) -> list[Whole
                 )
                 for e in named.execute(
                     f"SELECT {_EVENT_COLUMNS} FROM conversation_events"
-                    " WHERE conversation_id = ? ORDER BY id",
+                    " WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations) ORDER BY id",
                     (c["id"],),
                 ).fetchall()
             ],
@@ -1240,7 +1247,7 @@ def read_whole_conversations(db: sqlite3.Connection, user_id: str) -> list[Whole
                 ConnectedCall(k["connected_at"], k["duration_s"])
                 for k in named.execute(
                     "SELECT connected_at, duration_s FROM calls"
-                    " WHERE conversation_id = ? ORDER BY id",
+                    " WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations) ORDER BY id",
                     (c["id"],),
                 ).fetchall()
             ],
@@ -1251,7 +1258,7 @@ def read_whole_conversations(db: sqlite3.Connection, user_id: str) -> list[Whole
                 )
                 for r in named.execute(
                     "SELECT ja, zh, segments, created_at FROM reach_outs"
-                    " WHERE conversation_id = ? ORDER BY id",
+                    " WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations) ORDER BY id",
                     (c["id"],),
                 ).fetchall()
             ],
@@ -1263,11 +1270,11 @@ def read_whole_conversations(db: sqlite3.Connection, user_id: str) -> list[Whole
 def _contacts(db: sqlite3.Connection, user_id: str) -> list[Contact]:
     rows = by_name(db).execute(
         "SELECT c.character_id, 'turn' AS kind, m.created_at, 0 AS liked FROM messages m"
-        " JOIN conversations c ON c.id = m.conversation_id"
+        " JOIN sc_conversations c ON c.id = m.conversation_id"
         " WHERE c.user_id = ? AND m.role = 'user'"
         " UNION ALL"
         " SELECT c.character_id, 'gift' AS kind, e.created_at, e.liked"
-        " FROM conversation_events e JOIN conversations c ON c.id = e.conversation_id"
+        " FROM conversation_events e JOIN sc_conversations c ON c.id = e.conversation_id"
         " WHERE c.user_id = ? AND e.kind = 'gift'",
         (user_id, user_id),
     ).fetchall()
@@ -1287,7 +1294,7 @@ def keep_call(
     gone meanwhile, deleted with the user, say. Whether it was kept."""
     kept = db.execute(
         "INSERT INTO calls (conversation_id, connected_at, duration_s)"
-        " SELECT id, ?, ? FROM conversations WHERE id = ?",
+        " SELECT id, ?, ? FROM sc_conversations WHERE id = ?",
         (connected_at.astimezone(UTC).isoformat(), duration_s, conversation_id),
     ).rowcount
     _answer_reach_out(db, conversation_id)
@@ -1297,7 +1304,7 @@ def keep_call(
 def _kept_calls(db: sqlite3.Connection, user_id: str) -> list[KeptCall]:
     rows = by_name(db).execute(
         "SELECT c.character_id, k.connected_at, k.duration_s FROM calls k"
-        " JOIN conversations c ON c.id = k.conversation_id WHERE c.user_id = ?",
+        " JOIN sc_conversations c ON c.id = k.conversation_id WHERE c.user_id = ?",
         (user_id,),
     ).fetchall()
     return [KeptCall(r["character_id"], _at(r["connected_at"]), r["duration_s"]) for r in rows]
@@ -1307,11 +1314,11 @@ def _first_records(db: sqlite3.Connection, user_id: str) -> dict[str, datetime]:
     # Each from the user's conversations, so as to read only what is in them.
     rows = by_name(db).execute(
         "SELECT character_id, MIN(at) AS first FROM ("
-        " SELECT c.character_id, m.created_at AS at FROM conversations c"
+        " SELECT c.character_id, m.created_at AS at FROM sc_conversations c"
         "  JOIN messages m ON m.conversation_id = c.id WHERE c.user_id = :user"
-        " UNION ALL SELECT c.character_id, e.created_at FROM conversations c"
+        " UNION ALL SELECT c.character_id, e.created_at FROM sc_conversations c"
         "  JOIN conversation_events e ON e.conversation_id = c.id WHERE c.user_id = :user"
-        " UNION ALL SELECT c.character_id, k.connected_at FROM conversations c"
+        " UNION ALL SELECT c.character_id, k.connected_at FROM sc_conversations c"
         "  JOIN calls k ON k.conversation_id = c.id WHERE c.user_id = :user"
         ") GROUP BY character_id",
         {"user": user_id},
@@ -1323,7 +1330,7 @@ def _latest_conversations(
     db: sqlite3.Connection, user_id: str
 ) -> list[tuple[Conversation, Recorded | None, bool]]:
     rows = by_name(db).execute(
-        "SELECT * FROM conversations WHERE user_id = ?"
+        "SELECT id,user_id,character_id,created_at,title FROM sc_conversations WHERE user_id = ?"
         " ORDER BY created_at DESC, rowid DESC",
         (user_id,),
     ).fetchall()
@@ -1336,7 +1343,7 @@ def _latest_conversations(
 def _unseen(db: sqlite3.Connection, conversation_id: str) -> bool:
     """Whether the conversation has a reach-out the user has not seen."""
     return db.execute(
-        "SELECT EXISTS (SELECT 1 FROM reach_outs WHERE conversation_id = ? AND seen = 0)",
+        "SELECT EXISTS (SELECT 1 FROM reach_outs WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations) AND seen = 0)",
         (conversation_id,),
     ).fetchone()[0] == 1
 
@@ -1346,18 +1353,18 @@ def _last(db: sqlite3.Connection, conversation_id: str) -> Recorded | None:
     list shows her last line, and whether she sent a photo with it."""
     named = by_name(db)
     row = named.execute(
-        f"SELECT {_MESSAGE_WITH_PHOTO} WHERE m.conversation_id = ?"
+        f"SELECT {_MESSAGE_WITH_PHOTO} WHERE m.conversation_id = ? AND m.conversation_id IN (SELECT id FROM sc_conversations)"
         " ORDER BY m.id DESC LIMIT 1",
         (conversation_id,),
     ).fetchone()
     message = _message_with_photo(row) if row else None
     event = named.execute(
-        f"SELECT {_EVENT_COLUMNS} FROM conversation_events WHERE conversation_id = ?"
+        f"SELECT {_EVENT_COLUMNS} FROM conversation_events WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations)"
         " AND kind != 'ended' ORDER BY created_at DESC, id DESC LIMIT 1",
         (conversation_id,),
     ).fetchone()
     reach_out = named.execute(
-        f"SELECT {_REACH_OUT_COLUMNS} FROM reach_outs WHERE conversation_id = ?"
+        f"SELECT {_REACH_OUT_COLUMNS} FROM reach_outs WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations)"
         " ORDER BY created_at DESC, id DESC LIMIT 1",
         (conversation_id,),
     ).fetchone()
@@ -1370,7 +1377,7 @@ def _last(db: sqlite3.Connection, conversation_id: str) -> Recorded | None:
     if latest is None or message is None:
         return latest or message
     said = db.execute(
-        "SELECT created_at FROM messages WHERE conversation_id = ? AND role = 'user'"
+        "SELECT created_at FROM messages WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations) AND role = 'user'"
         " ORDER BY id DESC LIMIT 1",
         (conversation_id,),
     ).fetchone()
@@ -1439,7 +1446,7 @@ def _give_up_photos(db: sqlite3.Connection, reason: PhotoFailure) -> int:
 def _photo(db: sqlite3.Connection, photo_id: str, user_id: str) -> Photo | None:
     row = by_name(db).execute(
         "SELECT p.id, p.status, p.reason, p.tag FROM photos p"
-        " JOIN conversations c ON c.id = p.conversation_id"
+        " JOIN sc_conversations c ON c.id = p.conversation_id"
         " WHERE p.id = ? AND c.user_id = ?",
         (photo_id, user_id),
     ).fetchone()
@@ -1448,7 +1455,7 @@ def _photo(db: sqlite3.Connection, photo_id: str, user_id: str) -> Photo | None:
 
 def _photo_image(db: sqlite3.Connection, photo_id: str, user_id: str) -> bytes | None:
     row = db.execute(
-        "SELECT p.image FROM photos p JOIN conversations c ON c.id = p.conversation_id"
+        "SELECT p.image FROM photos p JOIN sc_conversations c ON c.id = p.conversation_id"
         " WHERE p.id = ? AND c.user_id = ? AND p.status = 'ready'",
         (photo_id, user_id),
     ).fetchone()
@@ -1489,7 +1496,7 @@ def read_ended(db: sqlite3.Connection, conversation_id: str) -> ConversationEven
     `db`; None while it is not ended."""
     row = by_name(db).execute(
         f"SELECT {_EVENT_COLUMNS} FROM conversation_events"
-        " WHERE conversation_id = ? AND kind = 'ended' ORDER BY id LIMIT 1",
+        " WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations) AND kind = 'ended' ORDER BY id LIMIT 1",
         (conversation_id,),
     ).fetchone()
     return _event(row) if row else None
@@ -1497,7 +1504,7 @@ def read_ended(db: sqlite3.Connection, conversation_id: str) -> ConversationEven
 
 def _typed_turns(db: sqlite3.Connection, conversation_id: str, latest: int) -> list[Typed]:
     rows = db.execute(
-        "SELECT hurt, out_of_line FROM messages WHERE conversation_id = ?"
+        "SELECT hurt, out_of_line FROM messages WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations)"
         " AND role = 'user' AND hurt IS NOT NULL ORDER BY id DESC LIMIT ?",
         (conversation_id, latest),
     ).fetchall()
@@ -1506,7 +1513,7 @@ def _typed_turns(db: sqlite3.Connection, conversation_id: str, latest: int) -> l
 
 def _list_messages(db: sqlite3.Connection, conversation_id: str) -> list[Message]:
     rows = by_name(db).execute(
-        f"SELECT {_MESSAGE_WITH_PHOTO} WHERE m.conversation_id = ? ORDER BY m.id",
+        f"SELECT {_MESSAGE_WITH_PHOTO} WHERE m.conversation_id = ? AND m.conversation_id IN (SELECT id FROM sc_conversations) ORDER BY m.id",
         (conversation_id,),
     ).fetchall()
     return [_message_with_photo(row) for row in rows]
@@ -1520,11 +1527,11 @@ def read_record(db: sqlite3.Connection, conversation_id: str) -> list[Recorded]:
     messages = _list_messages(db, conversation_id)
     named = by_name(db)
     events = named.execute(
-        f"SELECT {_EVENT_COLUMNS} FROM conversation_events WHERE conversation_id = ?",
+        f"SELECT {_EVENT_COLUMNS} FROM conversation_events WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations)",
         (conversation_id,),
     ).fetchall()
     reach_outs = named.execute(
-        f"SELECT {_REACH_OUT_COLUMNS} FROM reach_outs WHERE conversation_id = ?",
+        f"SELECT {_REACH_OUT_COLUMNS} FROM reach_outs WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations)",
         (conversation_id,),
     ).fetchall()
     pending: list[ConversationEvent | ReachOut] = sorted(
@@ -1549,7 +1556,7 @@ def _record_and_unseen(
     if not given:
         return entries, None
     [(unseen,)] = db.execute(
-        "SELECT EXISTS (SELECT 1 FROM reach_outs WHERE conversation_id = ? AND id <= ?"
+        "SELECT EXISTS (SELECT 1 FROM reach_outs WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations) AND id <= ?"
         " AND seen = 0)",
         (conversation_id, max(given)),
     ).fetchall()
@@ -1558,7 +1565,7 @@ def _record_and_unseen(
 
 def _see_reach_outs(db: sqlite3.Connection, conversation_id: str, up_to: int) -> None:
     db.execute(
-        "UPDATE reach_outs SET seen = 1 WHERE conversation_id = ? AND id <= ? AND seen = 0",
+        "UPDATE reach_outs SET seen = 1 WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations) AND id <= ? AND seen = 0",
         (conversation_id, up_to),
     )
 
@@ -1572,7 +1579,7 @@ def _current_conversations(db: sqlite3.Connection) -> list[CurrentConversation]:
         "  AS reached_out_at,"
         " EXISTS (SELECT 1 FROM conversation_events e WHERE e.conversation_id = c.id"
         "  AND e.kind = 'ended') AS ended"
-        " FROM conversations c JOIN users u ON u.id = c.user_id AND u.banned_at IS NULL"
+        " FROM sc_conversations c JOIN users u ON u.id = c.user_id AND u.banned_at IS NULL"
         f" WHERE {_CURRENT}"
     ).fetchall()
     calls: dict[str, list[tuple[str, float]]] = {}
@@ -1580,7 +1587,7 @@ def _current_conversations(db: sqlite3.Connection) -> list[CurrentConversation]:
     # are conversations would be more than a statement may bind.
     for conversation_id, connected_at, duration_s in db.execute(
         "SELECT k.conversation_id, k.connected_at, k.duration_s FROM calls k"
-        f" JOIN conversations c ON c.id = k.conversation_id WHERE {_CURRENT}"
+        f" JOIN sc_conversations c ON c.id = k.conversation_id WHERE {_CURRENT}"
     ):
         calls.setdefault(conversation_id, []).append((connected_at, duration_s))
     return [
@@ -1606,13 +1613,13 @@ def read_last_contact(
     was later; None before either."""
     [last_turn] = db.execute(
         "SELECT MAX(m.created_at) FROM messages m"
-        " JOIN conversations c ON c.id = m.conversation_id"
+        " JOIN sc_conversations c ON c.id = m.conversation_id"
         " WHERE c.user_id = ? AND c.character_id = ?",
         (user_id, character_id),
     ).fetchone()
     calls = db.execute(
         "SELECT k.connected_at, k.duration_s FROM calls k"
-        " JOIN conversations c ON c.id = k.conversation_id"
+        " JOIN sc_conversations c ON c.id = k.conversation_id"
         " WHERE c.user_id = ? AND c.character_id = ?",
         (user_id, character_id),
     ).fetchall()
@@ -1628,13 +1635,13 @@ def _add_reach_out(
 ) -> ReachOut:
     ja, zh = "".join(s.ja for s in said), "".join(s.zh for s in said)
     current = db.execute(
-        "SELECT n.id FROM conversations c JOIN conversations n"
+        "SELECT n.id FROM sc_conversations c JOIN sc_conversations n"
         " ON n.user_id = c.user_id AND n.character_id = c.character_id"
         " WHERE c.id = ? ORDER BY n.created_at DESC, n.rowid DESC LIMIT 1",
         (conversation_id,),
     ).fetchone()
     [reached_out_at] = db.execute(
-        "SELECT MAX(created_at) FROM reach_outs WHERE conversation_id = ?",
+        "SELECT MAX(created_at) FROM reach_outs WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations)",
         (conversation_id,),
     ).fetchone()
     if (
@@ -1673,7 +1680,7 @@ def _answer_reach_out(db: sqlite3.Connection, conversation_id: str) -> None:
     touch in it now: a turn recorded, or a call connected, after it and before the next.
     One whose record is not kept yet is marked as it is (`_reach_out_recorded_as`)."""
     latest = db.execute(
-        "SELECT record_id FROM reach_outs WHERE conversation_id = ?"
+        "SELECT record_id FROM reach_outs WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations)"
         " ORDER BY created_at DESC, id DESC LIMIT 1",
         (conversation_id,),
     ).fetchone()
@@ -1692,10 +1699,10 @@ def _last_contact_in(db: sqlite3.Connection, conversation_id: str) -> datetime |
     """When the user and she were last in touch in the conversation, as
     `current_conversations` has it."""
     [last_turn] = db.execute(
-        "SELECT MAX(created_at) FROM messages WHERE conversation_id = ?", (conversation_id,)
+        "SELECT MAX(created_at) FROM messages WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations)", (conversation_id,)
     ).fetchone()
     calls = db.execute(
-        "SELECT connected_at, duration_s FROM calls WHERE conversation_id = ?",
+        "SELECT connected_at, duration_s FROM calls WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations)",
         (conversation_id,),
     ).fetchall()
     return _last_contact(last_turn, calls)
@@ -1711,6 +1718,8 @@ def _insert_message(
     created_at: str | None = None,
     typed: Typed | None = None,
 ) -> Message:
+    if _conversation(db, conversation_id) is None:
+        raise NotFound("conversation outside SC scope")
     created_at = created_at or _now()
     ja = zh = None
     if segments is not None:
@@ -1765,15 +1774,15 @@ def add_carried_conversation(
     begun."""
     begun = _at(conversation.created_at)
     for row in db.execute(
-        "SELECT id, created_at FROM conversations WHERE user_id = ? AND character_id = ?",
+        "SELECT id, created_at FROM sc_conversations WHERE user_id = ? AND character_id = ?",
         (user_id, conversation.character_id),
     ).fetchall():
         if _at(row[1]) == begun:
             return row[0], False
     conversation_id = uuid.uuid4().hex
     db.execute(
-        "INSERT INTO conversations (id, user_id, character_id, created_at, title)"
-        " VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO conversations (id, user_id, character_id, created_at, title, work_id)"
+        " VALUES (?, ?, ?, ?, ?, 'sc')",
         (conversation_id, user_id, conversation.character_id, conversation.created_at,
          conversation.title),
     )

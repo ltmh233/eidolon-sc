@@ -334,11 +334,16 @@ async def test_deleting_the_user_deletes_the_titles_of_their_conversations(
 async def test_a_database_from_before_titles_lists_its_conversations_untitled_and_names_new_turns(
     make_client: ClientFactory, settings: Settings
 ):
-    client = make_client(FakeLLM(REPLY))
-    old = await start_conversation(client)
-    await say(client, old, 1)
+    from eidolon.work_schema import migrate
+    from tests.test_work_schema import legacy
+
+    legacy(settings.database_path)
+    old = "c"
     with sqlite3.connect(settings.database_path) as db:  # as the table was before titles
+        db.execute("UPDATE users SET name='producer'")
+        db.execute("UPDATE conversations SET character_id='mano'")
         db.execute("ALTER TABLE conversations DROP COLUMN title")
+    migrate(settings.database_path, settings.database_path.with_suffix(".before.db"))
 
     reopened = make_client(FakeLLM(REPLY, REPLY), background_llm=FakeBackgroundLLM(TITLE))
     untitled = await listed_titles(reopened)

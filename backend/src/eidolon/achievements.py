@@ -252,22 +252,22 @@ def launch(
         return None
     progress = list(db.execute(
         "SELECT c.user_id, 'turns', c.character_id, COUNT(*) FROM messages m"
-        " JOIN conversations c ON c.id = m.conversation_id WHERE m.role = 'user'"
+        " JOIN sc_conversations c ON c.id = m.conversation_id WHERE m.role = 'user'"
         " GROUP BY c.user_id, c.character_id"
         " UNION ALL SELECT c.user_id, 'call_time', c.character_id, SUM(k.duration_s)"
-        " FROM calls k JOIN conversations c ON c.id = k.conversation_id"
+        " FROM calls k JOIN sc_conversations c ON c.id = k.conversation_id"
         " GROUP BY c.user_id, c.character_id"
         " UNION ALL SELECT c.user_id, 'gifts', c.character_id, COUNT(*)"
-        " FROM conversation_events e JOIN conversations c ON c.id = e.conversation_id"
+        " FROM conversation_events e JOIN sc_conversations c ON c.id = e.conversation_id"
         " WHERE e.kind = 'gift' GROUP BY c.user_id, c.character_id"
     ))
     tiers: dict[tuple[str, str], int] = {}
     for user_id, character_id, tier in db.execute(
         "SELECT DISTINCT c.user_id, c.character_id, json_extract(m.affinity, '$.tier')"
-        " FROM messages m JOIN conversations c ON c.id = m.conversation_id"
+        " FROM messages m JOIN sc_conversations c ON c.id = m.conversation_id"
         " WHERE m.affinity IS NOT NULL"
         " UNION SELECT c.user_id, c.character_id, json_extract(e.affinity, '$.tier')"
-        " FROM conversation_events e JOIN conversations c ON c.id = e.conversation_id"
+        " FROM conversation_events e JOIN sc_conversations c ON c.id = e.conversation_id"
         " WHERE e.kind = 'gift' AND e.affinity IS NOT NULL"
         # Recovering only ever brings it back to normal: as kept, it is in the tier it is.
         " UNION SELECT user_id, character_id, value FROM affinities WHERE value >= ?",
@@ -286,9 +286,9 @@ def launch(
     days = db.execute(
         "SELECT user_id, ?, COUNT(DISTINCT day), MAX(day) FROM ("
         " SELECT c.user_id, day_of(m.created_at) AS day FROM messages m"
-        " JOIN conversations c ON c.id = m.conversation_id WHERE m.role = 'user'"
+        " JOIN sc_conversations c ON c.id = m.conversation_id WHERE m.role = 'user'"
         " UNION ALL SELECT c.user_id, day_of(e.created_at) FROM conversation_events e"
-        " JOIN conversations c ON c.id = e.conversation_id WHERE e.kind = 'gift'"
+        " JOIN sc_conversations c ON c.id = e.conversation_id WHERE e.kind = 'gift'"
         ") GROUP BY user_id",
         (_ALL,),
     ).fetchall()

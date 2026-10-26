@@ -359,7 +359,9 @@ class ReachOuts:
 
 
 def _open(db: sqlite3.Connection) -> None:
+    from eidolon.work_schema import guard_sc_children
     db.executescript(_SCHEMA)
+    guard_sc_children(db)
 
 
 def _tier(status: Status | None) -> Tier | None:

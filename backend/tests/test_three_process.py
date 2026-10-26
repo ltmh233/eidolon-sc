@@ -111,6 +111,16 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert len(cookies) >= 2, cookies
             assert any("eidolon_session=" in cookie and "HttpOnly" in cookie for cookie in cookies)
             assert (await client.post("/api/account/consent", json={"agree_to_terms": True, "at_least_13": True})).status_code == 204
+            previous = await client.get(f"/api/conversations/{info['history']}/messages")
+            assert previous.status_code == 200 and "原文" in previous.text
+            assert info["migration"]["counts"]["messages"] == 1
+            resumed = await client.post(f"/api/conversations/{info['history']}/turns", json={"text": "continue migrated history"})
+            assert resumed.status_code == 200 and '"done"' in resumed.text
+            for boundary, hidden_id in (("cross-work", info["hidden"]), ("cross-user", info["other"])):
+                assert (await client.get(f"/api/conversations/{hidden_id}/messages")).status_code == 404, (boundary, "GET messages")
+                assert (await client.delete(f"/api/conversations/{hidden_id}")).status_code == 404, (boundary, "DELETE")
+                assert (await client.post(f"/api/conversations/{hidden_id}/turns", json={"text": "must refuse"})).status_code == 404, (boundary, "POST turns")
+            print("PASS migrated SC history read/resume; cross-work/user HTTP read/write/delete rejected")
             created = await client.post("/api/conversations", json={"character_id": "mano"}, headers={"X-Work-ID": "sc"})
             assert created.status_code == 201, created.text
             conversation = created.json()["id"]

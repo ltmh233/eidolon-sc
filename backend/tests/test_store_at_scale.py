@@ -44,8 +44,8 @@ async def test_every_users_current_conversation_however_many(tmp_path: Path):
     count = 33_000  # more than SQLite's 32,766 values a statement
     with sqlite3.connect(path) as db:
         db.executemany(
-            "INSERT INTO conversations (id, user_id, character_id, created_at)"
-            " VALUES (?, ?, ?, '2026-10-01T00:00:00+00:00')",
+            "INSERT INTO conversations (id, user_id, character_id, created_at, work_id)"
+            " VALUES (?, ?, ?, '2026-10-01T00:00:00+00:00', 'sc')",
             [(f"conversation-{i}", user, f"character-{i}") for i in range(count)],
         )
         db.execute(

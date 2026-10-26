@@ -63,8 +63,8 @@ class History:
         id = f"c{self._conversations}"
         with self._db:
             self._db.execute(
-                "INSERT INTO conversations (id, user_id, character_id, created_at)"
-                " VALUES (?, ?, ?, ?)",
+                "INSERT INTO conversations (id, user_id, character_id, created_at, work_id)"
+                " VALUES (?, ?, ?, ?, 'sc')",
                 (id, self._user, character, START.isoformat()),
             )
         return id

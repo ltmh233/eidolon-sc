@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, TypeVar, TypeVarTuple, Unpack
 
 from eidolon.database import connect
+from eidolon.work_schema import require_ready
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +91,11 @@ class Database:
     def __init__(self, path: Path, readers: int = READERS) -> None:
         self.path = path
         self._writer = connect(path)
+        try:
+            require_ready(self._writer)
+        except BaseException:
+            self._writer.close()
+            raise
         self._readers: list[sqlite3.Connection] = []
         try:
             for _ in range(readers):

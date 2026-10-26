@@ -572,6 +572,11 @@ class Memories:
         has is left out, or if superseded, holds again and supersedes what it names."""
         added = []
         user_id = conversation.user_id
+        parent = db.execute(
+            "SELECT user_id,work_id FROM conversations WHERE id=?", (conversation.id,)
+        ).fetchone()
+        if parent is not None and tuple(parent) != (user_id, "sc"):
+            raise ValueError("memory requires its owner's SC conversation")
         created_at = now.astimezone(UTC).isoformat()
         for memory in written:
             kept = db.execute(
@@ -585,7 +590,7 @@ class Memories:
                 cursor = db.execute(
                     "INSERT INTO memories"
                     " (user_id, source_character_id, conversation_id, text, created_at)"
-                    " VALUES (?, ?, (SELECT id FROM conversations WHERE id = ?), ?, ?)",
+                    " VALUES (?, ?, (SELECT id FROM sc_conversations WHERE id = ?), ?, ?)",
                     (user_id, conversation.character_id, conversation.id, memory.text,
                      created_at),
                 )
@@ -642,7 +647,9 @@ class Memories:
 
 
 def _open(db: sqlite3.Connection) -> None:
+    from eidolon.work_schema import guard_sc_children
     db.executescript(_SCHEMA)
+    guard_sc_children(db)
     columns = {row[1] for row in db.execute("PRAGMA table_info(memories)")}
     if "superseded_by" not in columns:  # kept from before superseding: all hold
         db.execute("ALTER TABLE memories ADD COLUMN superseded_by INTEGER")
