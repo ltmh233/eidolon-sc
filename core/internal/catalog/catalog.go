@@ -34,7 +34,12 @@ type Work struct {
 	Characters []Character `json:"characters,omitempty"`
 }
 
-type Registry struct{ works map[string]Work }
+type Registry struct {
+	works             map[string]Work
+	staticCharacters  map[string][]map[string]any
+	contentDigest     string
+	displayCharacters []map[string]any
+}
 
 // Load discovers exactly <root>/<package>/work.json. A broken package fails startup;
 // there is no partial registration, hot reload, executable plugin or DB migration.

@@ -21,7 +21,16 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:8081", "private listen address")
 	packs := flag.String("packs", "packs", "comma-separated package roots")
 	legacy := flag.String("legacy", "http://127.0.0.1:8000", "private Python backend origin")
+	scWorld := flag.String("sc-world", "", "reviewed SC world.json for offline export")
+	export := flag.String("export-worlds", "", "write private world snapshot atomically, then exit (no listener)")
+	characters := flag.String("sc-characters", "", "include SC characters TOML in a unified v2 snapshot")
+	snapshot := flag.String("content-snapshot", "", "private v2 snapshot for native static character catalogs")
+	withGifts := flag.Bool("with-gifts", false, "export v3 unified static content, including gifts")
+	display := flag.String("catalog-display", "", "published SC display metadata bound to content-snapshot")
 	flag.Parse()
+	if *withGifts && (*export == "" || *characters == "") {
+		log.Fatal("-with-gifts requires character export")
+	}
 	upstream, err := url.Parse(*legacy)
 	if err != nil || upstream.Host == "" || upstream.Scheme != "http" || upstream.User != nil || upstream.RawQuery != "" || upstream.Fragment != "" || (upstream.Path != "" && upstream.Path != "/") {
 		log.Fatal("legacy must be a private HTTP origin without credentials or path")
@@ -29,6 +38,37 @@ func main() {
 	registry, err := catalog.Load(strings.Split(*packs, ",")...)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *export != "" {
+		if *scWorld == "" {
+			log.Fatal("-export-worlds requires -sc-world")
+		}
+		var err error
+		if *characters != "" {
+			err = catalog.ExportRelease(registry, *characters, *scWorld, *export, *withGifts)
+		} else {
+			err = catalog.ExportWorlds(registry, *scWorld, *export)
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *scWorld != "" || *characters != "" {
+		log.Fatal("-sc-world requires -export-worlds; private content is not served over HTTP")
+	}
+	if *snapshot != "" {
+		if err := catalog.AttachContent(registry, *snapshot); err != nil {
+			log.Fatal(err)
+		}
+	}
+	if *display != "" {
+		if *snapshot == "" {
+			log.Fatal("catalog-display requires content-snapshot")
+		}
+		if err := catalog.AttachDisplay(registry, *display); err != nil {
+			log.Fatal(err)
+		}
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // local service calls must never go through ambient proxy settings

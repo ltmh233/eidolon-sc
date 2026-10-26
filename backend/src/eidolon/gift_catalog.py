@@ -76,8 +76,13 @@ def load_gift_catalog(path: Path) -> dict[str, Gift]:
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
         raise GiftCatalogError(f"礼物目录 {path} 格式有误：{e}") from None
     entries = config.get("gifts", [])
+    return gifts_from_entries(entries)
+
+
+def gifts_from_entries(entries: list[dict]) -> dict[str, Gift]:
+    """Materialize normalized Go definitions, sharing validation with source editing tools."""
     if not isinstance(entries, list):
-        raise GiftCatalogError(f"礼物目录 {path} 里的 gifts 应当是 [[gifts]] 段")
+        raise GiftCatalogError("礼物目录的 gifts 应当是条目列表")
 
     catalog: dict[str, Gift] = {}
     for entry in entries:

@@ -1,8 +1,10 @@
 # Eidolon Go core — first slice
 
+第二阶段支持世界 v1、角色/世界 v2，以及加 `-with-gifts` 导出的角色/世界/礼物 v3 私有快照。Python 通过 `EIDOLON_CHARACTER_SNAPSHOT` 消费 v2/v3。Go 的 `-content-snapshot` 提供基础静态目录；同时配置 `-catalog-display` 后可独立提供完整 SC 展示目录。展示元数据由离线 Python 命令复用旧接口算法生成，不需要运行中的 Python 服务。旧 `/api/characters` 仍由 Python 提供。详见 [世界切片](../docs/migration/go-content-world-slice.md)、[角色切片](../docs/migration/go-content-character-slice.md) 和 [收尾验收](../docs/migration/go-content-final-slice.md)。
+
 AGPL-3.0-or-later，沿用根目录许可证。本目录为可信作品目录和可选兼容入口，**不是完整的多作品聊天后端**。
 
-从仓库根目录运行（Go >= 1.27，无第三方 Go 依赖）：
+从仓库根目录运行（Go >= 1.27；TOML 使用锁定的 `github.com/pelletier/go-toml/v2 v2.2.4`，MIT 许可证，校验和在 go.sum）：
 
 ```sh
 cd core
@@ -19,7 +21,7 @@ go build -trimpath -o /tmp/eidolon-core ./cmd/eidolon-core
 | API | 行为 |
 |---|---|
 | `GET /api/works` | 默认作品、作品名称、能力声明 |
-| `GET /api/works/sc/characters` | Go 通过 Python 的公开目录适配，返回 `sc:mano` 等全局 ID；`display` 完整保留旧目录字段 |
+| `GET /api/works/sc/characters` | 配置展示元数据时由 Go 原生提供；否则保留 Python 公开目录适配。返回 `sc:mano` 等全局 ID，`display` 保留旧目录字段 |
 | `GET /api/works/demo/characters` | 完全由 Go 从内容包读取；不公开人设 |
 | `GET /api/works/demo/world` | 该作品单独的世界设定；此字段是公开内容 |
 | `GET /api/works/sc/world` | 501；SC 世界设定继续由 Python 内部使用 |
@@ -45,3 +47,34 @@ EIDOLON_CORE_BINARY=/tmp/eidolon-core uv run pytest -q tests/test_go_catalog.py 
 CI 已配置以上检查。没有 `EIDOLON_CORE_BINARY` 时 Python 联调明确 skip；没有 `EIDOLON_TCP_TESTS=1` 时只跳过真实 TCP 测试，HTTP framing/SSE 的内存连接测试仍执行。
 
 回滚：恢复 Next.js 的 `BACKEND_URL` 指向 Python 并重启前端，停掉 Go。没有数据库回滚步骤。当前 Docker overlay 的 `GOMEMLIMIT=64MiB` 是 GC 软目标，96 MiB 容器限额是试验预算，不是已测得峰值；应在上线前连同并发 SSE/语音做总 RSS 测量。提供修改版网络服务和分发镜像时，应保留 AGPL 声明并提供对应版本的完整源代码；内容素材权利与代码许可证分别处理。
+
+## 内容发布（在准备好的隔离构建环境中运行）
+
+每次使用新的发布目录，下面路径仅为示例。先编辑或生成源内容，再一次性导出；不得直接修改正在运行服务所挂载的内容目录。
+
+```sh
+/work/eidolon-core -packs /work/core/packs,/work/core/testdata/packs \
+  -sc-world /work/characters/world.json -sc-characters /work/characters/characters.toml \
+  -with-gifts -export-worlds /release/content.json
+cd /work/backend
+.venv/bin/python -m eidolon.content_publish \
+  --snapshot /release/content.json --characters /work/characters/characters.toml \
+  --output /release/display.json
+```
+
+有外部素材域名时，加 `--assets-url`，与 Python 的素材基址配置一致。此命令不生成或上传音频，只调用原有纯展示算法。源内容、素材、两个输出应作为同一不可变版本部署：Go 配置 `-content-snapshot /release/content.json -catalog-display /release/display.json`；Python 配置 `EIDOLON_CHARACTER_SNAPSHOT=/release/content.json` 和 `EIDOLON_CATALOG_DISPLAY=/release/display.json`。后者在创建数据库前验证目录与内容摘要、完整 JSON 和素材配置一致。先校验，再重启两个服务并对比完整目录；不支持热更新。
+
+每个输出单独原子替换，**两个文件不是一个跨文件事务**。不得混用发布版本；Go 检查摘要绑定和公开字段白名单，Python 再检查完整展示投影。两个服务各自配置不同但完整合法的发布版本仍需发布流程/上线前比对阻止，不能依靠本地摘要检查发现。
+
+v1 世界路径保持兼容；省略 `-with-gifts` 导出 v2，Python 从旧 gifts.toml 加载礼物供回滚。旧消费者不接受 v3，需同时回滚消费者和同批 v2 源内容。完全回滚可撤销快照/展示配置并恢复原加载方式；数据库无需回滚。显式配置损坏快照时禁止静默回退。
+
+真实三进程验收需准备 Next 生产 standalone 构建与 Go 二进制，在测试容器内运行：
+
+```sh
+cd /work/backend
+EIDOLON_CORE_BINARY=/work/eidolon-core \
+EIDOLON_NEXT_SERVER=/work/next-standalone/server.js \
+.venv/bin/pytest -q -s tests/test_three_process.py tests/test_content_release.py
+```
+
+测试分别启动 Next、Go、Uvicorn，使用临时 SQLite，仅模拟外部服务。未设置两个二进制路径时三进程测试明确跳过；当前 CI 不等于已自动运行这项生产构建验收。

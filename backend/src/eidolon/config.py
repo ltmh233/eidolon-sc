@@ -471,6 +471,11 @@ class Settings:
     """Where browsers download the stands from, without a trailing slash: the public URL
     of the object storage they are synced to (ADR-0003, revised 2026-09-30). None shows
     every character's call background without her stand."""
+    world_snapshot_path: Path | None = None
+    """Private Go world snapshot. When set, never fall back to raw world.json."""
+    character_snapshot_path: Path | None = None
+    """Unified v2 character/world snapshot; fail closed on missing or mixed content."""
+    catalog_display_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.background_llm is None:
@@ -512,6 +517,15 @@ class Settings:
         return cls(
             database_path=database_path_from_env(),
             characters_path=characters_path_from_env(),
+            world_snapshot_path=(
+                Path(snapshot) if (snapshot := os.environ.get("EIDOLON_WORLD_SNAPSHOT")) else None
+            ),
+            character_snapshot_path=(
+                Path(content) if (content := os.environ.get("EIDOLON_CHARACTER_SNAPSHOT")) else None
+            ),
+            catalog_display_path=(
+                Path(display) if (display := os.environ.get("EIDOLON_CATALOG_DISPLAY")) else None
+            ),
             chat_llm=chat_llm,
             background_llm=LLMSettings.background_from_env(),
             call_reasoning_effort=effort_from_env(

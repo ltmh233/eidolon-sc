@@ -38,6 +38,8 @@ from eidolon.announcements import Announcements
 from eidolon.backup import Backups
 from eidolon.call import Calls, Speech, SpeechServices
 from eidolon.characters import Character, load_characters
+from eidolon.content_snapshot import load_sc_content, load_sc_world
+from eidolon.content_publish import verify_display
 from eidolon.gift_catalog import Gift, check_liked_gifts, gifts_path, load_gift_catalog
 from eidolon.gifts import Gifts
 from eidolon.happenings import Happenings
@@ -211,10 +213,20 @@ def build(
     used instead of made. Raises RuntimeError, having opened nothing, if the character
     configuration (her liked gifts and all), the world setting or the gift catalog is broken,
     or a character is none of its idols and none of its staff."""
-    characters = load_characters(settings.characters_path)
-    gift_catalog = load_gift_catalog(gifts_path(settings.characters_path))
+    content = load_sc_content(
+        settings.character_snapshot_path, settings.characters_path, settings.world_snapshot_path,
+    ) if settings.character_snapshot_path is not None else None
+    characters = content.characters if content else load_characters(settings.characters_path)
+    if settings.catalog_display_path is not None:
+        if content is None:
+            raise ValueError("published catalog requires character snapshot")
+        verify_display(settings.catalog_display_path, content, settings.stand_assets_url)
+    gift_catalog = content.gifts if content and content.gifts is not None else load_gift_catalog(gifts_path(settings.characters_path))
     check_liked_gifts(characters, gift_catalog)
-    world = load_world(path := world_path(settings.characters_path))
+    path = settings.world_snapshot_path or world_path(settings.characters_path)
+    world = content.world if content else (
+        load_sc_world(path) if settings.world_snapshot_path is not None else load_world(path)
+    )
     if world is None:
         log.info(
             "there is no world setting at %s: characters go without it (run `eidolon world"
@@ -242,7 +254,7 @@ def build(
     # the configuration in effect has it at each request; their clients are made on these.
     routes = ProxyRoutes(settings.proxy)
     closers.append(routes.aclose)
-    readings = load_readings(readings_path(settings.characters_path))
+    readings = content.readings if content else load_readings(readings_path(settings.characters_path))
     speech = speech or SpeechServices(
         bailian_model, readings, hot_words(readings, characters.values(), world), routes=routes
     )

@@ -50,7 +50,7 @@ administrator has reviewed it and removed the line; the marker never reaches the
 import logging
 import re
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
@@ -184,9 +184,21 @@ def load_characters(path: Path, require_sheets: bool = True) -> dict[str, Charac
         raise CharacterConfigError(f"角色配置文件 {path} 格式有误：{e}") from None
 
     readings = load_readings(readings_path(path))
+    return characters_from_entries(config.get("characters", []), path, readings, require_sheets)
+
+
+def characters_from_entries(
+    entries: list[dict], path: Path, readings: tuple[Reading, ...],
+    require_sheets: bool = True, read_text: Callable[[Path], str] | None = None,
+) -> dict[str, Character]:
+    """Materialize a checked configuration; source readers supply text without reparsing TOML.
+
+    Shared field guards also protect the snapshot boundary. Markdown segmentation,
+    delivery cues and pronunciation matching keep one implementation here.
+    """
     characters: dict[str, Character] = {}
-    for entry in config.get("characters", []):
-        character = _parse_character(entry, path.parent, require_sheets, readings)
+    for entry in entries:
+        character = _parse_character(entry, path.parent, require_sheets, readings, read_text)
         if character.id in characters:
             raise CharacterConfigError(f"角色标识 {character.id} 重复")
         for other in characters.values():
@@ -207,7 +219,8 @@ def in_idol_order(characters: Iterable[Character]) -> list[Character]:
 
 
 def _parse_character(
-    entry: dict, base: Path, require_sheet: bool, readings: tuple[Reading, ...]
+    entry: dict, base: Path, require_sheet: bool, readings: tuple[Reading, ...],
+    read_text: Callable[[Path], str] | None = None,
 ) -> Character:
     label = entry.get("id", "（没有标识）")
     missing = [field for field in _REQUIRED if not isinstance(entry.get(field), str)]
@@ -229,7 +242,7 @@ def _parse_character(
 
     sheet_path = base / entry["sheet"]
     try:
-        sheet = sheet_path.read_text(encoding="utf-8").strip()
+        sheet = (read_text(sheet_path) if read_text else sheet_path.read_text(encoding="utf-8")).strip()
     except FileNotFoundError:
         if require_sheet:
             raise CharacterConfigError(
@@ -245,7 +258,7 @@ def _parse_character(
     if isinstance(entry.get("facts"), str):
         facts_path = base / entry["facts"]
         try:
-            facts = parse_facts(facts_path.read_text(encoding="utf-8"))
+            facts = parse_facts(read_text(facts_path) if read_text else facts_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             log.warning("facts %s of character %s are missing; retrieving none", facts_path, label)
 

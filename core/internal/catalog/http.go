@@ -80,6 +80,13 @@ func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper) http.H
 			return
 		}
 		switch parts[1] {
+		case "static-characters":
+			listed, ok := r.staticCharacters[work.ID]
+			if !ok {
+				failure(w, 501, "static content snapshot not configured")
+				return
+			}
+			respond(w, map[string]any{"work_id": work.ID, "characters": listed})
 		case "world":
 			if work.Source == "legacy-sc" {
 				failure(w, 501, "SC world remains internal to Python")
@@ -87,6 +94,11 @@ func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper) http.H
 			}
 			respond(w, map[string]any{"work_id": work.ID, "setting": work.World})
 		case "characters":
+			if work.ID == "sc" && r.displayCharacters != nil {
+				w.Header().Set("X-Content-ID", r.contentDigest)
+				respond(w, map[string]any{"work_id": "sc", "characters": r.displayCharacters})
+				return
+			}
 			result := make([]map[string]any, 0, len(work.Characters))
 			if work.Source == "legacy-sc" {
 				target := *upstream
