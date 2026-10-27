@@ -12,7 +12,7 @@ them closed."""
 
 from dataclasses import replace
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -27,20 +27,24 @@ from eidolon.gifts import (
     NoSuchCharacter,
 )
 from eidolon.sessions import UserId
+from eidolon.sc_scope import require_sc, sc_request
 
 
 class DrawInput(BaseModel):
+    work_id: object = "sc"
     all: bool = False
     """Draw every chance the user has, not just one."""
 
 
 class GiftInput(BaseModel):
+    work_id: object = "sc"
     gift_id: str
 
 
 def add_gift_routes(app: FastAPI, backend: Backend) -> None:
     catalog, gifts, store = backend.gift_catalog, backend.gifts, backend.store
     happenings = backend.happenings
+    routes = APIRouter(dependencies=[Depends(sc_request)])
 
     @app.exception_handler(GiftsClosed)
     async def gifts_closed(_: Request, e: GiftsClosed) -> JSONResponse:
@@ -53,12 +57,12 @@ def add_gift_routes(app: FastAPI, backend: Backend) -> None:
     async def none_to_use(_: Request, e: Exception) -> JSONResponse:
         return JSONResponse({"detail": str(e)}, status_code=409)
 
-    @app.get("/api/gifts/catalog")
+    @routes.get("/api/gifts/catalog")
     def read_catalog(_: UserId) -> list[dict]:
         """Every gift, retired ones too (whoever has one still sees it), in catalog order."""
         return [g.described() for g in catalog.values()]
 
-    @app.get("/api/gifts")
+    @routes.get("/api/gifts")
     async def read_state(user_id: UserId) -> dict:
         """What the user has, having been given the draw chances due today; whether gifts
         are open, and if so when the next chance is given and each character's affinity,
@@ -71,29 +75,31 @@ def add_gift_routes(app: FastAPI, backend: Backend) -> None:
             "achievements": of_all and [p.shown() for p in of_all],
         }
 
-    @app.post("/api/gifts/draws")
+    @routes.post("/api/gifts/draws")
     async def draw(body: DrawInput, user_id: UserId) -> dict:
         """Draw once or every chance, having been given those due today: what each draw
         gave, in order, how many chances are left, and what drawing was rewarded with (None
         if nothing), its draw chances among those left."""
+        require_sc(body.work_id)
         drawn, rewarded = await happenings.draw(user_id, all=body.all)
         if rewarded is not None:
             drawn = replace(drawn, draws=drawn.draws + rewarded.draws)
         return drawn.shown() | {"rewarded": rewarded and rewarded.shown()}
 
-    @app.post("/api/characters/{character_id}/gifts")
+    @routes.post("/api/characters/{character_id}/gifts")
     async def give(character_id: str, body: GiftInput, user_id: UserId) -> dict:
         """Give her one of the gift: where its record went, how her affinity changed, where
         it is now, how many of the gift are left, and what giving it was rewarded with (None
         if nothing). Not a turn: no limit or cooldown holds
         it, and the user need not bring their own LLM."""
+        require_sc(body.work_id)
         try:
             given, rewarded = await happenings.give(user_id, body.gift_id, character_id)
         except NoSuchCharacter as e:
             raise HTTPException(404, str(e)) from None
         return given.shown() | {"rewarded": rewarded and rewarded.shown()}
 
-    @app.get("/api/characters/{character_id}/achievements")
+    @routes.get("/api/characters/{character_id}/achievements")
     async def read_hers(character_id: str, user_id: UserId) -> dict | None:
         """How far the user has come with her own achievements, and whether she is complete;
         None while affinity and gifts are closed."""
@@ -102,12 +108,12 @@ def add_gift_routes(app: FastAPI, backend: Backend) -> None:
         achieved = await happenings.hers(user_id, character_id)
         return achieved and achieved.shown()
 
-    @app.post("/api/gifts/resets")
+    @routes.post("/api/gifts/resets")
     async def use_reset_card(user_id: UserId) -> dict:
         """Use a reset card: whom it brought back to trust, and how many cards are left."""
         return (await gifts.use_reset_card(user_id)).shown()
 
-    @app.get("/api/admin/gifts")
+    @routes.get("/api/admin/gifts")
     async def read_admin_gifts(_: Admin) -> dict:
         """How many users there are now, each to be given a reset card; when they last were,
         and how many; and whether gifts are open."""
@@ -119,7 +125,9 @@ def add_gift_routes(app: FastAPI, backend: Backend) -> None:
             "open": backend.config.affinity_on,
         }
 
-    @app.post("/api/admin/gifts/reset-card-grants")
+    @routes.post("/api/admin/gifts/reset-card-grants")
     async def grant_reset_cards(_: Admin) -> dict:
         """Give every user there is now a reset card: when, and how many were given."""
         return (await gifts.grant_reset_cards()).shown()
+
+    app.include_router(routes)

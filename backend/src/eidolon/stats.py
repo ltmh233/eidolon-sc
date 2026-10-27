@@ -38,7 +38,7 @@ from datetime import date, datetime, timedelta
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, Header, Query
+from fastapi import Depends, FastAPI, Header, Query
 from starlette.concurrency import run_in_threadpool
 
 from eidolon.achievements import Tally
@@ -46,6 +46,7 @@ from eidolon.affinity import TIERS, Tier
 from eidolon.assembly import Backend
 from eidolon.characters import in_idol_order
 from eidolon.producer import effective_timezone
+from eidolon.sc_scope import sc_request
 from eidolon.sessions import UserId
 from eidolon.store import Contact, KeptCall
 
@@ -61,7 +62,7 @@ RANGE_DAYS: dict[Range, int | None] = {"30d": 30, "1y": 365, "all": None}
 def add_stats_routes(app: FastAPI, backend: Backend) -> None:
     store = backend.store
 
-    @app.get("/api/stats")
+    @app.get("/api/stats", dependencies=[Depends(sc_request)])
     async def stats(
         user_id: UserId,
         span: Annotated[Range, Query(alias="range")] = "all",

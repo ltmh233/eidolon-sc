@@ -9,7 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -57,6 +57,7 @@ from eidolon.announcements_api import add_announcement_routes
 from eidolon.calendar_api import add_calendar_routes
 from eidolon.gifts_api import add_gift_routes
 from eidolon.photos_api import add_photo_routes
+from eidolon.sc_scope import sc_request
 from eidolon.sessions import UserId, session_middleware
 from eidolon.sponsor_api import add_sponsor_routes
 from eidolon.stats import add_stats_routes
@@ -437,7 +438,7 @@ def create_app(backend: Backend) -> FastAPI:
             raise HTTPException(404, "没有这位角色的通话背景图")
         return _picture(character.background, request)
 
-    @app.get("/api/characters/{character_id}/affinity")
+    @app.get("/api/characters/{character_id}/affinity", dependencies=[Depends(sc_request)])
     async def affinity(character_id: str, user_id: UserId) -> dict | None:
         """Her affinity with the user now, by tier only, and when the cooldown ends if she
         is in one; null while affinity is off."""

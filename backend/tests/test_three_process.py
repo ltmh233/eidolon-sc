@@ -111,6 +111,20 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert len(cookies) >= 2, cookies
             assert any("eidolon_session=" in cookie and "HttpOnly" in cookie for cookie in cookies)
             assert (await client.post("/api/account/consent", json={"agree_to_terms": True, "at_least_13": True})).status_code == 204
+            from tests.test_sc_play_scope import gameplay_snapshot
+            before_scope = gameplay_snapshot(tmp_path / "test.db")
+            for boundary, origin in (("next-go-python", ""), ("direct", python_url)):
+                for path, body in (
+                    ("/api/gifts/draws", {"all": False, "work_id": "demo"}),
+                    ("/api/characters/mano/gifts", {"gift_id": "cake", "work_id": None}),
+                ):
+                    rejected = await client.post(origin + path, json=body)
+                    assert rejected.status_code == 409, (boundary, path, body, rejected.text)
+                    assert gameplay_snapshot(tmp_path / "test.db") == before_scope, (boundary, path, body)
+                rejected = await client.get(origin + "/api/gifts?work_id=sc&work_id=demo")
+                assert rejected.status_code == 409, (boundary, "GET gifts", rejected.text)
+                assert gameplay_snapshot(tmp_path / "test.db") == before_scope, (boundary, "GET gifts")
+            print("PASS SC gameplay scope rejection without SQLite effects through Next/Go and direct Python")
             previous = await client.get(f"/api/conversations/{info['history']}/messages")
             assert previous.status_code == 200 and "原文" in previous.text
             assert info["migration"]["counts"]["messages"] == 1
