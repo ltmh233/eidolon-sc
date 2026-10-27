@@ -15,6 +15,16 @@ function get(path: string, headers: Record<string, string> = {}) {
 }
 
 describe("forwarding /api/* to the backend", () => {
+  it("preserves grant keys including an explicit empty value for backend rejection", async () => {
+    for (const value of ["12345678-1234-4234-8234-123456789abc", ""]) {
+      const fetch = backendAnswers(() => Response.json({ count: 1 }));
+      const response = await POST(new Request("http://localhost/api/admin/gifts/reset-card-grants", {
+        method: "POST", headers: { "Idempotency-Key": value },
+      }), { params: Promise.resolve({ path: ["admin", "gifts", "reset-card-grants"] }) });
+      expect(new Headers(fetch.mock.calls[0][1].headers).get("Idempotency-Key"), value).toBe(value);
+      await response.text();
+    }
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
   });

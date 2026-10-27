@@ -23,7 +23,7 @@ async def test_v1_memory_upgrade_preserves_history_and_work_dedup(tmp_path):
         before = db.execute("SELECT * FROM memories ORDER BY id").fetchall()
         vectors = db.execute("SELECT * FROM memory_vectors").fetchall()
     result = migrate(path, tmp_path / "backup.db")
-    assert result["version"] == 2
+    assert result["version"] == 3
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT id,user_id,source_character_id,conversation_id,text,created_at,superseded_by FROM memories ORDER BY id").fetchall() == before
         assert db.execute("SELECT * FROM memory_vectors").fetchall() == vectors

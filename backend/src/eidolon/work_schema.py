@@ -1,6 +1,6 @@
-"""Explicit offline v0/v1 -> v2 migration. Python remains the only SQLite writer.
+"""Explicit offline v0/v1/v2 -> v3 migration. Python remains the only SQLite writer.
 
-The version covers conversation and memory scope contracts; other module-owned SC
+The version covers conversation/memory scope and durable grant outcomes; other SC
 tables retain their layouts. Existing databases are never upgraded at startup.
 """
 import argparse
@@ -14,7 +14,7 @@ from pathlib import Path
 
 from eidolon.database import connect, tables
 
-VERSION = 2
+VERSION = 3
 IDENTIFIER = re.compile(r"[a-z0-9_-]+\Z")
 CONVERSATION_COLUMNS = {"id", "user_id", "character_id", "created_at", "title"}
 TRIGGERS = {"conversation_scope_required", "conversation_identity_immutable",
@@ -52,8 +52,8 @@ def version(db: sqlite3.Connection) -> int:
 
 def require_ready(db: sqlite3.Connection) -> None:
     current = version(db)
-    if current == 1:
-        raise RuntimeError("legacy memory database requires offline migration and verified backup")
+    if current in (1, 2):
+        raise RuntimeError("legacy database requires offline migration and verified backup")
     if current not in (0, VERSION):
         raise RuntimeError("unsupported database schema version; use matching application/backup")
     if "conversations" not in tables(db):
@@ -62,6 +62,12 @@ def require_ready(db: sqlite3.Connection) -> None:
         return
     if current == 0:
         raise RuntimeError("legacy database requires offline migration and verified backup")
+    _require_scoped(db)
+    from eidolon.grant_schema import require_ready as require_grants
+    require_grants(db)
+
+
+def _require_scoped(db: sqlite3.Connection) -> None:
     columns = {r[1] for r in db.execute("PRAGMA table_info(conversations)")}
     triggers = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
     views = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='view'")}
@@ -181,6 +187,8 @@ def install(db: sqlite3.Connection, work_ids: tuple[str, ...] = ("sc",)) -> None
     guard_sc_children(db)
     from eidolon.memory_schema import install as install_memories
     install_memories(db)
+    from eidolon.grant_schema import install as install_grants
+    install_grants(db)
 
 
 def guard_sc_children(db: sqlite3.Connection) -> None:
@@ -239,7 +247,10 @@ def migrate(path: Path, backup: Path, work_ids: tuple[str, ...] = ("sc",)) -> di
             check_integrity(db)
             return {"version": VERSION, "already_migrated": True}
         previous = version(db)
-        if previous == 1:
+        if previous == 2:
+            _require_scoped(db)
+            check_integrity(db)
+        elif previous == 1:
             triggers = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
             if not TRIGGERS <= triggers or "work_id" not in {r[1] for r in db.execute("PRAGMA table_info(conversations)")}:
                 raise RuntimeError("invalid v1 conversation schema")
@@ -268,9 +279,12 @@ def migrate(path: Path, backup: Path, work_ids: tuple[str, ...] = ("sc",)) -> di
             reader.close()
         with backup.open("rb") as saved:
             os.fsync(saved.fileno())
-        if previous == 1:
+        if previous in (1, 2):
             from eidolon.memory_schema import install as install_memories
-            install_memories(db)
+            from eidolon.grant_schema import install as install_grants
+            if previous == 1:
+                install_memories(db)
+            install_grants(db)
             db.execute(f"PRAGMA user_version={VERSION}")
         else:
             install(db, work_ids)

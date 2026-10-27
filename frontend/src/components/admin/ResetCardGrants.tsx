@@ -18,8 +18,11 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { copy } from "@/i18n";
-import { getAdminGifts, grantResetCards, type AdminGifts } from "@/lib/adminGifts";
+import { getAdminGifts, type AdminGifts } from "@/lib/adminGifts";
+import { getAccount } from "@/lib/api";
+import { beginResetGrant, pendingResetGrants, resolveResetGrant, type PendingResetGrant } from "@/lib/resetGrantIntents";
 import { ANNOUNCEMENTS_HREF } from "@/lib/announcements";
 import { toFailure, type Failure } from "@/lib/failure";
 
@@ -36,6 +39,9 @@ export function ResetCardGrants({ isOn }: { isOn: boolean }) {
   const [isConfirming, setConfirming] = useState(false);
   const [isGranting, setGranting] = useState(false);
   const [granted, setGranted] = useState<number | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [pending, setPending] = useState<PendingResetGrant[]>([]);
+  const [storageReady, setStorageReady] = useState(false);
   const titleId = useId();
   const users = gifts?.users ?? 0;
 
@@ -43,19 +49,53 @@ export function ResetCardGrants({ isOn }: { isOn: boolean }) {
     getAdminGifts().then(setGifts, (e) => setFailure(toFailure(e)));
   }, [isOn]);
 
-  async function grant() {
+  useEffect(() => {
+    let active = true;
+    getAccount().then((account) => {
+      if (active) setUserId(account.id);
+    }, (e) => { if (active) setFailure(toFailure(e)); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!userId) return;
+    function refreshPending() {
+      try {
+        setPending(pendingResetGrants(userId!));
+        setStorageReady(true);
+      } catch (e) {
+        setStorageReady(false);
+        setFailure(toFailure(e));
+      }
+    }
+    refreshPending();
+    window.addEventListener("storage", refreshPending);
+    return () => window.removeEventListener("storage", refreshPending);
+  }, [userId]);
+
+  async function grant(operationId?: string) {
+    if (!userId) return;
     setGranting(true);
     setFailure(null);
     setGranted(null);
     try {
-      const { count } = await grantResetCards();
+      const intent = operationId ?? beginResetGrant(userId).operationId;
+      setPending(pendingResetGrants(userId));
+      const { count } = await resolveResetGrant(userId, intent);
       setGranted(count);
-      setGifts(await getAdminGifts());
+      // The POST has succeeded. A display refresh failure cannot create a new grant.
+      getAdminGifts().then(setGifts, (e) => setFailure(toFailure(e)));
     } catch (e) {
       setFailure(toFailure(e));
       // 多半是别处刚关了开关：重读一遍，「发放」随之不可用。
       getAdminGifts().then(setGifts, () => {});
     } finally {
+      try {
+        setPending(pendingResetGrants(userId));
+      } catch (e) {
+        setStorageReady(false);
+        setFailure(toFailure(e));
+      }
       setGranting(false);
       setConfirming(false);
     }
@@ -83,10 +123,21 @@ export function ResetCardGrants({ isOn }: { isOn: boolean }) {
             </p>
           )}
         </div>
-        <Button variant="outline" size="sm" disabled={!gifts?.open || isGranting} onClick={() => setConfirming(true)}>
+        <Button variant="outline" size="sm" disabled={!gifts?.open || isGranting || !storageReady || pending.length > 0} onClick={() => setConfirming(true)}>
           {t.grant}
         </Button>
       </div>
+      {pending.length > 0 && (
+        <Alert>
+          <AlertDescription className="flex flex-col items-start gap-3">
+            <p>{t.pending(pending.length)}</p>
+            <Button variant="outline" size="sm" disabled={isGranting || !storageReady} onClick={() => void grant(pending[0].operationId)}>
+              {isGranting && <Spinner data-icon="inline-start" />}
+              {t.resolve}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
       {granted !== null && (
         <Notice text={t.granted(granted)} onDismiss={() => setGranted(null)}>
           {t.announce.before}
@@ -103,7 +154,7 @@ export function ResetCardGrants({ isOn }: { isOn: boolean }) {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={isGranting}>{copy.common.cancel}</AlertDialogCancel>
-            <AlertDialogAction disabled={isGranting} onClick={grant}>
+            <AlertDialogAction disabled={isGranting || !storageReady || pending.length > 0} onClick={() => void grant()}>
               {isGranting && <Spinner data-icon="inline-start" />}
               {t.dialog.confirm(users)}
             </AlertDialogAction>

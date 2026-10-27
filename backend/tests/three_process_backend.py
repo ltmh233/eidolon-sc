@@ -19,7 +19,7 @@ from tests.conftest import github_identity
 from tests.fakes import FakeCatalog, FakeIdentityProvider, FakeLLM, FakeLLMService, FakeSpeech, FakeEmbedder, FakeReranker, FakeJudge, FakeClock, build_faked
 
 
-async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | None) -> None:
+async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | None, *, listen_host: str = "127.0.0.1") -> None:
     root = Path(__file__).resolve().parents[2]
 
     class ObservedLLM(FakeLLM):
@@ -48,6 +48,7 @@ async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | 
         ice_servers=[], secret_key="three-process-test-only", dev_login=False,
         character_snapshot_path=snapshot, catalog_display_path=display,
         stand_assets_url=assets_url,
+        admins=frozenset({("github", "1001")}), affinity_and_gifts=True,
     )
     history(settings.database_path)
     with sqlite3.connect(settings.database_path) as db:
@@ -80,7 +81,7 @@ async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | 
         await app(scope, receive, send)
 
     listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
+    listener.bind((listen_host, 0))
     (directory / "backend.json").write_text(json.dumps({
         "port": listener.getsockname()[1], "pid": os.getpid(), "code": code,
         "history": "c", "hidden": hidden.id, "other": other.id, "migration": migration,

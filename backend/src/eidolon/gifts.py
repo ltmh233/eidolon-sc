@@ -37,6 +37,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from itertools import accumulate
+from uuid import uuid4
 
 from eidolon.affinity import (
     BELOW_TRUST,
@@ -79,11 +80,7 @@ CREATE TABLE IF NOT EXISTS gift_backpacks (
     count INTEGER NOT NULL,
     PRIMARY KEY (user_id, gift_id)
 );
--- One row each time an admin gave every user a reset card: when, and how many were given.
-CREATE TABLE IF NOT EXISTS reset_card_grants (
-    granted_at TEXT NOT NULL,
-    count INTEGER NOT NULL
-);
+-- reset_card_grants is installed atomically by work_schema/grant_schema.
 -- One row per reward each user was given, by its key, given once: how many draw chances and
 -- reset cards it gave, and when.
 CREATE TABLE IF NOT EXISTS gift_rewards (
@@ -423,13 +420,26 @@ class Gifts:
                 given.append((user_id, r))
         return given
 
-    async def grant_reset_cards(self) -> Grant:
+    async def grant_reset_cards(self, operation_id: str | None = None) -> Grant:
         """Give every user there is now a reset card, banned ones and admins too, all at
         once, so that whoever signs up meanwhile gets none; one who has had no draw chances
-        yet is given the new user's one too, that day. Raises GiftsClosed if gifts are not
-        open."""
-        await self.refuse_unless_open()
-        return await self._db.write(_grant_reset_cards, self._clock())
+        yet is given the new user's one too, that day. A supplied operation id replays the
+        original outcome, even while closed; omitting it means a new grant. Raises
+        GiftsClosed only for a new grant while gifts are not open."""
+        return await self._db.write(
+            self._grant_reset_cards, operation_id or str(uuid4()), self._is_open()
+        )
+
+    def _grant_reset_cards(self, db: sqlite3.Connection, operation_id: str, is_open: bool) -> Grant:
+        previous = db.execute(
+            "SELECT granted_at,count FROM reset_card_grants WHERE operation_id=?", (operation_id,)
+        ).fetchone()
+        if previous is not None:
+            return Grant(datetime.fromisoformat(previous[0]), previous[1])
+        if not is_open:
+            raise GiftsClosed()
+        self._notice(db, True)
+        return _grant_reset_cards(db, self._clock(), operation_id)
 
     async def last_grant(self) -> Grant | None:
         """The latest time every user was given a reset card; None if never."""
@@ -549,7 +559,7 @@ def _last_rewarded(db: sqlite3.Connection, user_id: str) -> datetime | None:
     return at and datetime.fromisoformat(at)
 
 
-def _grant_reset_cards(db: sqlite3.Connection, now: datetime) -> Grant:
+def _grant_reset_cards(db: sqlite3.Connection, now: datetime, operation_id: str) -> Grant:
     # Writing first holds the database for writing until done: no one signs up in between.
     given = db.execute("UPDATE gift_balances SET reset_cards = reset_cards + 1").rowcount
     unbalanced = db.execute(
@@ -559,8 +569,8 @@ def _grant_reset_cards(db: sqlite3.Connection, now: datetime) -> Grant:
         _start(db, user_id, day_of(now), reset_cards=1)
     grant = Grant(now, given + len(unbalanced))
     db.execute(
-        "INSERT INTO reset_card_grants (granted_at, count) VALUES (?, ?)",
-        (now.isoformat(), grant.count),
+        "INSERT INTO reset_card_grants (granted_at, count, operation_id) VALUES (?, ?, ?)",
+        (now.isoformat(), grant.count, operation_id),
     )
     return grant
 

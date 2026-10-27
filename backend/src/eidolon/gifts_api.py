@@ -11,6 +11,7 @@ are refused with 409 and `gifts_closed`, told apart from a cooldown's 409, so th
 them closed."""
 
 from dataclasses import replace
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -126,8 +127,20 @@ def add_gift_routes(app: FastAPI, backend: Backend) -> None:
         }
 
     @routes.post("/api/admin/gifts/reset-card-grants")
-    async def grant_reset_cards(_: Admin) -> dict:
+    async def grant_reset_cards(_: Admin, request: Request) -> dict:
         """Give every user there is now a reset card: when, and how many were given."""
-        return (await gifts.grant_reset_cards()).shown()
+        keys = request.headers.getlist("idempotency-key")
+        operation_id = None
+        if keys:
+            try:
+                if len(keys) != 1:
+                    raise ValueError()
+                parsed = UUID(keys[0])
+                if parsed.version != 4 or str(parsed) != keys[0]:
+                    raise ValueError()
+                operation_id = keys[0]
+            except ValueError:
+                raise HTTPException(400, "invalid Idempotency-Key") from None
+        return (await gifts.grant_reset_cards(operation_id)).shown()
 
     app.include_router(routes)

@@ -125,6 +125,23 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
                 assert rejected.status_code == 409, (boundary, "GET gifts", rejected.text)
                 assert gameplay_snapshot(tmp_path / "test.db") == before_scope, (boundary, "GET gifts")
             print("PASS SC gameplay scope rejection without SQLite effects through Next/Go and direct Python")
+            from uuid import uuid4
+            operation_id = str(uuid4())
+            grant_route = "/api/admin/gifts/reset-card-grants"
+            first_grant = await client.post(grant_route, headers={"Idempotency-Key": operation_id})
+            assert first_grant.status_code == 200, first_grant.text
+            # Treat the first result as lost; a repeat must return the persisted outcome.
+            assert (await client.put("/api/admin/config/affinity", json={"enabled": False})).status_code == 200
+            before_replay = gameplay_snapshot(tmp_path / "test.db")
+            replay = await client.post(grant_route, headers={"Idempotency-Key": operation_id})
+            assert replay.status_code == 200 and replay.json() == first_grant.json(), replay.text
+            assert gameplay_snapshot(tmp_path / "test.db") == before_replay, "closed replay wrote gameplay state"
+            for label, key in (("empty", ""), ("combined", operation_id + "," + str(uuid4()))):
+                invalid = await client.post(grant_route, headers={"Idempotency-Key": key})
+                assert invalid.status_code == 400, (label, invalid.text)
+                assert gameplay_snapshot(tmp_path / "test.db") == before_replay, label
+            assert (await client.put("/api/admin/config/affinity", json={"enabled": True})).status_code == 200
+            print("PASS durable grant replay and invalid keys through Next/Go/Python")
             previous = await client.get(f"/api/conversations/{info['history']}/messages")
             assert previous.status_code == 200 and "原文" in previous.text
             assert info["migration"]["counts"]["messages"] == 1

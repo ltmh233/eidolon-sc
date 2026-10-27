@@ -1565,6 +1565,8 @@ export const zh = {
         lastCount: (n: number) => `，共 ${n} 张`,
         never: "还没有发过",
         grant: "发放",
+        pending: (n: number) => `还有 ${n} 次发放的结果未确认。请先核对，避免重复发放。`,
+        resolve: "核对上次发放",
         dialog: {
           title: "给所有现有用户各发一张重置卡？",
           description: (n: number) => `现有的 ${n} 位用户每人多一张，之后注册的用户拿不到。发出后不能收回。`,

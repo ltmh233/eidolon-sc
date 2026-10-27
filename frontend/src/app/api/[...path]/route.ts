@@ -12,9 +12,9 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
   const url = `${BACKEND_URL}/api/${path.map(encodeURIComponent).join("/")}${search}`;
   const headers = new Headers();
   // The Go gateway must see explicit work scope to reject DLC requests on legacy SC routes.
-  for (const name of ["content-type", "cookie", "origin", "x-timezone", "x-work-id", "if-none-match"]) {
+  for (const name of ["content-type", "cookie", "origin", "x-timezone", "x-work-id", "if-none-match", "idempotency-key"]) {
     const value = request.headers.get(name);
-    if (value) headers.set(name, value);
+    if (value !== null && (value !== "" || name === "idempotency-key")) headers.set(name, value);
   }
 
   const hasBody = request.method !== "GET" && request.method !== "HEAD";

@@ -14,6 +14,8 @@ export async function getAdminGifts(): Promise<AdminGifts> {
 }
 
 /** 给所有现有用户各发一张。没开放时抛 `giftsClosed` 的 ApiError。 */
-export async function grantResetCards(): Promise<ResetCardGrant> {
-  return json(await api("/api/admin/gifts/reset-card-grants", { method: "POST" }));
+export async function grantResetCards(operationId: string): Promise<ResetCardGrant> {
+  return json(await api("/api/admin/gifts/reset-card-grants", {
+    method: "POST", headers: { "Idempotency-Key": operationId },
+  }));
 }
