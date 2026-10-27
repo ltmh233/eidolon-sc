@@ -442,6 +442,29 @@ class Affinities:
             return None
         return await self._db.read(self.read_status, user_id, character_id)
 
+    async def sc_snapshot(self, user_id: str, character_id: str) -> dict:
+        """Raw SC state for the trusted core; never used by public status responses."""
+        enabled = self.on
+        return await self._db.read(self._sc_snapshot, user_id, character_id, enabled)
+
+    def _sc_snapshot(self, db: sqlite3.Connection, user_id: str, character_id: str, enabled: bool) -> dict:
+        now = self._clock()
+        row = db.execute(
+            "SELECT value,updated_at,cooling FROM affinities WHERE user_id=? AND character_id=?",
+            (user_id, character_id),
+        ).fetchone() if enabled else None
+        state = None
+        if row is not None:
+            updated = datetime.fromisoformat(row[1])
+            if updated.utcoffset() is None:
+                raise ValueError("stored affinity timestamp must be timezone-aware")
+            updated = updated.astimezone(UTC)
+            delta = updated - datetime(1970, 1, 1, tzinfo=UTC)
+            state = {"value": row[0], "updated_at_us": (delta.days * 86400 + delta.seconds) * 1000000 + delta.microseconds,
+                     "cooling": bool(row[2])}
+        return {"version": 1, "work_id": "sc", "character_id": character_id,
+                "enabled": enabled, "observed_at": now.isoformat(), "state": state}
+
     def read_status(self, db: sqlite3.Connection, user_id: str, character_id: str) -> Status:
         """The user's affinity with the character now, read through `db`, on or off: whoever
         reads it is to read it only while affinity is `on`."""

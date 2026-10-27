@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"eidolon/core/internal/affinity"
 	"eidolon/core/internal/catalog"
 )
 
@@ -21,6 +22,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:8081", "private listen address")
 	packs := flag.String("packs", "packs", "comma-separated package roots")
 	legacy := flag.String("legacy", "http://127.0.0.1:8000", "private Python backend origin")
+	affinityToken := flag.String("affinity-token-file", "", "owner-only service credential file; enables Go affinity reads")
 	scWorld := flag.String("sc-world", "", "reviewed SC world.json for offline export")
 	export := flag.String("export-worlds", "", "write private world snapshot atomically, then exit (no listener)")
 	characters := flag.String("sc-characters", "", "include SC characters TOML in a unified v2 snapshot")
@@ -73,7 +75,15 @@ func main() {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // local service calls must never go through ambient proxy settings
 	transport.MaxIdleConnsPerHost = 16
-	server := &http.Server{Addr: *listen, Handler: catalog.Handler(registry, upstream, transport), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	var affinityRead http.Handler
+	if *affinityToken != "" {
+		token, err := affinity.ReadTokenFile(*affinityToken)
+		if err != nil {
+			log.Fatal(err)
+		}
+		affinityRead = affinity.NewHandler(upstream, transport, token)
+	}
+	server := &http.Server{Addr: *listen, Handler: catalog.Handler(registry, upstream, transport, affinityRead), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	stopped := make(chan struct{})

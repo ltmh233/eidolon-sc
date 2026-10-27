@@ -52,6 +52,10 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
     if not next_server or not binary:
         pytest.skip("set EIDOLON_NEXT_SERVER and EIDOLON_CORE_BINARY for three-process production acceptance")
     snapshot, display = tmp_path / "content.json", tmp_path / "display.json"
+    import secrets
+    token = tmp_path / "core-token"
+    token.write_text(secrets.token_hex(32))
+    token.chmod(0o600)
     result = export(CONFIG, snapshot, with_gifts=True)
     assert result.returncode == 0, result.stderr.decode()
     publish(snapshot, CONFIG, assets_url, display)
@@ -79,7 +83,8 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
         go_url, next_url = f"http://127.0.0.1:{go_port}", f"http://127.0.0.1:{next_port}"
         core = await spawn("go", binary, "-listen", f"127.0.0.1:{go_port}", "-legacy", python_url,
                            "-packs", f"{ROOT}/core/packs,{ROOT}/core/testdata/packs",
-                           "-content-snapshot", str(snapshot), "-catalog-display", str(display))
+                           "-content-snapshot", str(snapshot), "-catalog-display", str(display),
+                           "-affinity-token-file", str(token))
         await ready(go_url + "/api/works")
         next_process = await spawn("next", "node", next_server, env={
             **os.environ, "PORT": str(next_port), "HOSTNAME": "127.0.0.1", "BACKEND_URL": go_url,
@@ -111,6 +116,15 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert len(cookies) >= 2, cookies
             assert any("eidolon_session=" in cookie and "HttpOnly" in cookie for cookie in cookies)
             assert (await client.post("/api/account/consent", json={"agree_to_terms": True, "at_least_13": True})).status_code == 204
+            affinity_path = "/api/characters/mano/affinity"
+            computed = await client.get(affinity_path)
+            direct_affinity = await client.get(python_url + affinity_path)
+            assert computed.status_code == direct_affinity.status_code == 200
+            assert computed.json() == direct_affinity.json() == {"tier": "cold", "cooldown_until": None}
+            for origin in ("", go_url):
+                denied = await client.get(origin + "/api/_core/affinity/mano", headers={"Authorization": "Bearer " + token.read_text()})
+                assert denied.status_code == 404 and "value" not in denied.text, origin
+            print("PASS Go affinity computation through private authenticated snapshot; public raw routes denied")
             from tests.test_sc_play_scope import gameplay_snapshot
             before_scope = gameplay_snapshot(tmp_path / "test.db")
             for boundary, origin in (("next-go-python", ""), ("direct", python_url)):
@@ -132,6 +146,7 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert first_grant.status_code == 200, first_grant.text
             # Treat the first result as lost; a repeat must return the persisted outcome.
             assert (await client.put("/api/admin/config/affinity", json={"enabled": False})).status_code == 200
+            assert (await client.get(affinity_path)).json() is None
             before_replay = gameplay_snapshot(tmp_path / "test.db")
             replay = await client.post(grant_route, headers={"Idempotency-Key": operation_id})
             assert replay.status_code == 200 and replay.json() == first_grant.json(), replay.text
@@ -207,6 +222,7 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             observed = [json.loads(line) for line in (tmp_path / "requests.jsonl").read_text().splitlines()]
             print(f"OBSERVED Uvicorn ASGI spec: {sorted({q['asgi_spec'] for q in observed})}")
             assert any(q["path"] == "/api/conversations" and q["scope"] == "sc" and q["origin"] == "http://localhost" for q in observed)
+            assert any(q["path"] == "/api/_core/affinity/mano" for q in observed), "Go did not request raw affinity state"
             # Stop Python and prove the complete scoped catalog remains native to Go.
             backend.terminate()
             await asyncio.wait_for(backend.wait(), 10)

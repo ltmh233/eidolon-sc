@@ -78,3 +78,13 @@ EIDOLON_NEXT_SERVER=/work/next-standalone/server.js \
 ```
 
 测试分别启动 Next、Go、Uvicorn，使用临时 SQLite，仅模拟外部服务。未设置两个二进制路径时三进程测试明确跳过；当前 CI 不等于已自动运行这项生产构建验收。
+
+## SC affinity read model (optional, private upstream)
+
+Configure Python `EIDOLON_CORE_SERVICE_TOKEN_FILE` and Go `-affinity-token-file` with purpose-limited credential files containing the same 64 lowercase hex characters (32 random bytes), readable only by the owner. This is separate from user credentials and `EIDOLON_SECRET_KEY`. Both files must be regular files with no group/other permissions. Tests create synthetic credentials; enabling this in deployment requires a separate reviewed configuration change.
+
+With the flag, Go owns recovery, tier and cooldown calculation for `GET /api/characters/{id}/affinity`. Python authenticates the original session Cookie, fixes scope to SC, checks the character and live switch, and reads raw state from SQLite. A private versioned snapshot includes one server observation time; Go returns only the old public status shape. The Python public route remains available for direct compatibility/rollback. Without the flag, the gateway explicitly retains legacy proxy mode; once configured, upstream/contract errors fail closed without fallback.
+
+`/api/_core` is always blocked by the public Go router. Python's hidden raw endpoint additionally requires the service credential and a valid user session; client `user_id` declarations never choose the reader. Keep the upstream on the existing private HTTP/loopback network; never expose or log service credential content. Authentication errors and Set-Cookie are preserved; internal schema/credential failures return a generic gateway error.
+
+The contract's version covers the SC calculation rules as well as its field layout. Rule changes must update the Go/Python differential tests and consider a contract version increment; do not silently mix different rule releases. Schema remains v3 and Python remains the only SQLite accessor/writer. Gifts, stats and other affinity readers/writers remain Python-owned in this slice.

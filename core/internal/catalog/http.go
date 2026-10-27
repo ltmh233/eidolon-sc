@@ -11,17 +11,23 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"eidolon/core/internal/affinity"
 )
 
 // Handler adds public catalog reads, proxying legacy endpoints without rewriting
 // bodies, cookies, Origin, redirects or streaming responses. Python owns auth.
-func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper) http.Handler {
+func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper, affinityRead ...http.Handler) http.Handler {
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	proxy.Transport = transport
 	proxy.FlushInterval = -1
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) { failure(w, 502, "legacy backend unavailable") }
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	return http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
+		if q.URL.Path == "/api/_core" || strings.HasPrefix(q.URL.Path, "/api/_core/") {
+			failure(w, 404, "Not Found")
+			return
+		}
 		if q.URL.Path != "/api/works" && !strings.HasPrefix(q.URL.Path, "/api/works/") {
 			// Old endpoints are exclusively SC. Never interpret a supplied DLC scope as SC.
 			for _, scope := range append(q.URL.Query()["work_id"], q.Header.Values("X-Work-ID")...) {
@@ -29,6 +35,10 @@ func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper) http.H
 					failure(w, 409, "legacy API supports sc only; use /api/works/{work_id}")
 					return
 				}
+			}
+			if _, ok := affinity.CharacterID(q.URL.Path); ok && q.Method == "GET" && len(affinityRead) > 0 && affinityRead[0] != nil {
+				affinityRead[0].ServeHTTP(w, q)
+				return
 			}
 			// These legacy creation models ignore unknown JSON fields. Refuse an
 			// explicit DLC scope before it can accidentally create an SC conversation.

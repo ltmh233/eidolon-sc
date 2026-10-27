@@ -458,6 +458,8 @@ class Settings:
     """What the keys the admin console keeps are encrypted with, and the ban list hashed
     with; without it, no key is kept there and the ban list is a plain hash. Users' own
     keys are kept by no one but their browsers (ADR-0017)."""
+    core_service_token_path: Path | None = None
+    """Optional purpose-limited credential file for the core affinity read model."""
     gemini_billing_enabled: bool = False
     """The deployer says Gemini's billing is on, so its paid tier, which Google does not
     train on, embeds users' memories (ADR-0005, revised)."""
@@ -556,6 +558,7 @@ class Settings:
             github=OAuthSettings.from_env("GITHUB"),
             google=OAuthSettings.from_env("GOOGLE"),
             secret_key=os.environ.get("EIDOLON_SECRET_KEY") or None,
+            core_service_token_path=Path(os.environ["EIDOLON_CORE_SERVICE_TOKEN_FILE"]) if os.environ.get("EIDOLON_CORE_SERVICE_TOKEN_FILE") else None,
             gemini_billing_enabled=os.environ.get("GEMINI_BILLING_ENABLED", "").strip() == "1",
             stand_assets_url=stand_assets_url_from_env(),
             admins=admins_from_env(),

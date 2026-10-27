@@ -6,6 +6,7 @@ from pathlib import Path
 import socket
 import sys
 import time
+from datetime import timedelta
 import sqlite3
 
 import uvicorn
@@ -49,6 +50,7 @@ async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | 
         character_snapshot_path=snapshot, catalog_display_path=display,
         stand_assets_url=assets_url,
         admins=frozenset({("github", "1001")}), affinity_and_gifts=True,
+        core_service_token_path=(directory / "core-token") if (directory / "core-token").exists() else None,
     )
     history(settings.database_path)
     with sqlite3.connect(settings.database_path) as db:
@@ -68,6 +70,11 @@ async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | 
     await demo_memory.add("DEMO_SECRET_MEMORY", "mano", hidden.id)
     other_user = await backend.store.create_user("other")
     other = await backend.store.create_conversation(other_user.id, "mano")
+    if settings.core_service_token_path:
+        await backend.database.write(lambda db: db.execute(
+            "INSERT INTO affinities (user_id,character_id,value,updated_at,cooling) VALUES ('u','mano',0,?,0)",
+            ((backend.clock() - timedelta(hours=12)).isoformat(),),
+        ).rowcount)
     app = create_app(backend)
 
     async def observe(scope, receive, send):

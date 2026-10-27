@@ -58,6 +58,7 @@ from eidolon.calendar_api import add_calendar_routes
 from eidolon.gifts_api import add_gift_routes
 from eidolon.photos_api import add_photo_routes
 from eidolon.sc_scope import sc_request
+from eidolon.affinity_auth import affinity_service_auth
 from eidolon.sessions import UserId, session_middleware
 from eidolon.sponsor_api import add_sponsor_routes
 from eidolon.stats import add_stats_routes
@@ -437,6 +438,16 @@ def create_app(backend: Backend) -> FastAPI:
         if character is None or character.background is None:
             raise HTTPException(404, "没有这位角色的通话背景图")
         return _picture(character.background, request)
+
+    require_core = affinity_service_auth(backend.settings.core_service_token_path)
+
+    @app.get("/api/_core/affinity/{character_id}", include_in_schema=False,
+             dependencies=[Depends(require_core), Depends(sc_request)])
+    async def affinity_snapshot(character_id: str, user_id: UserId, response: Response) -> dict:
+        if character_id not in characters:
+            raise HTTPException(404, "角色不存在")
+        response.headers["Cache-Control"] = "no-store"
+        return await backend.affinities.sc_snapshot(user_id, character_id)
 
     @app.get("/api/characters/{character_id}/affinity", dependencies=[Depends(sc_request)])
     async def affinity(character_id: str, user_id: UserId) -> dict | None:
