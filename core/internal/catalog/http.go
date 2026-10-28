@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"eidolon/core/internal/affinity"
+	"eidolon/core/internal/timeline"
 )
 
 // Handler adds public catalog reads, proxying legacy endpoints without rewriting
@@ -36,8 +37,12 @@ func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper, readMo
 					return
 				}
 			}
-			// Optional native reads: affinity first, statistics second. Existing callers
+			// Optional native reads: affinity, statistics, then history. Existing callers
 			// without these handlers retain the explicit legacy proxy mode.
+			if _, ok := timeline.ConversationID(q.URL.Path); ok && q.Method == "GET" && len(readModels) > 2 && readModels[2] != nil {
+				readModels[2].ServeHTTP(w, q)
+				return
+			}
 			if q.URL.Path == "/api/stats" && q.Method == "GET" && len(readModels) > 1 && readModels[1] != nil {
 				readModels[1].ServeHTTP(w, q)
 				return

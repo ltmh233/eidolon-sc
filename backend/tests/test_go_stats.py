@@ -23,10 +23,10 @@ from tests.test_sc_play_scope import gameplay_snapshot
 
 
 @asynccontextmanager
-async def gateway_for(original, settings):
-    binary = os.environ.get('EIDOLON_STATS_BINARY')
+async def gateway_for(original, settings, *, binary_env='EIDOLON_STATS_BINARY', token_flag='-stats-token-file'):
+    binary = os.environ.get(binary_env)
     if not binary:
-        pytest.skip('set EIDOLON_STATS_BINARY for real Go statistics acceptance')
+        pytest.skip(f'set {binary_env} for real Go read-model acceptance')
     assert isinstance(original._transport, httpx.ASGITransport)
     app = cast(FastAPI, original._transport.app)
     server = uvicorn.Server(uvicorn.Config(app, lifespan='off', log_level='error'))
@@ -45,7 +45,7 @@ async def gateway_for(original, settings):
         process = await asyncio.create_subprocess_exec(
             binary, '-listen', '127.0.0.1:0', '-legacy', f'http://127.0.0.1:{listener.getsockname()[1]}',
             '-packs', f'{root}/core/packs,{root}/core/testdata/packs',
-            '-stats-token-file', str(settings.core_service_token_path), stderr=asyncio.subprocess.PIPE,
+            token_flag, str(settings.core_service_token_path), stderr=asyncio.subprocess.PIPE,
         )
         assert process.stderr is not None
         ready = await asyncio.wait_for(process.stderr.readline(), 10)

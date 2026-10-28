@@ -536,6 +536,31 @@ def create_app(backend: Backend) -> FastAPI:
         conversation = await conversation_or_404(conversation_id, user_id)
         return [recorded(entry) for entry in await store.read_by_user(conversation.id)]
 
+    @app.get("/api/_core/conversations/{conversation_id}/messages", include_in_schema=False,
+             dependencies=[Depends(require_core), Depends(sc_request)])
+    async def timeline_snapshot(conversation_id: str, user_id: UserId) -> Response:
+        conversation = await conversation_or_404(conversation_id, user_id)
+        messages, events, reach_outs = await store.read_parts_by_user(conversation.id)
+        # Preserve legacy unknown-gift failure after the captured seen watermark is kept.
+        if any(e.gift_id is not None and e.gift_id not in gift_catalog for e in events):
+            return JSONResponse({"error": "unknown_gift"}, status_code=500)
+
+        def rows():
+            yield ["meta", 1, "sc", conversation.id]
+            for message in messages:
+                yield ["message", asdict(message.without_cues())]
+            for event in events:
+                yield ["event", asdict(event), gift_catalog[event.gift_id].name if event.gift_id is not None else None]
+            for reach_out in reach_outs:
+                yield ["reach_out", asdict(reach_out.without_cues())]
+            yield ["end"]
+
+        def encoded():
+            for row in rows():
+                yield json.dumps(row, ensure_ascii=False, separators=(',', ':'), allow_nan=False) + '\n'
+
+        return StreamingResponse(encoded(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
+
     @app.post("/api/conversations/{conversation_id}/turns")
     async def text_turn(
         conversation_id: str,

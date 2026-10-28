@@ -84,7 +84,8 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
         core = await spawn("go", binary, "-listen", f"127.0.0.1:{go_port}", "-legacy", python_url,
                            "-packs", f"{ROOT}/core/packs,{ROOT}/core/testdata/packs",
                            "-content-snapshot", str(snapshot), "-catalog-display", str(display),
-                           "-affinity-token-file", str(token), "-stats-token-file", str(token))
+                           "-affinity-token-file", str(token), "-stats-token-file", str(token),
+                           "-timeline-token-file", str(token))
         await ready(go_url + "/api/works")
         next_process = await spawn("next", "node", next_server, env={
             **os.environ, "PORT": str(next_port), "HOSTNAME": "127.0.0.1", "BACKEND_URL": go_url,
@@ -231,6 +232,7 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert any(q["path"] == "/api/conversations" and q["scope"] == "sc" and q["origin"] == "http://localhost" for q in observed)
             assert any(q["path"] == "/api/_core/affinity/mano" for q in observed), "Go did not request raw affinity state"
             assert any(q["path"] == "/api/_core/stats" for q in observed), "Go did not request raw statistics"
+            assert any(q["path"].startswith("/api/_core/conversations/") for q in observed), "Go did not request raw history"
             # Stop Python and prove the complete scoped catalog remains native to Go.
             backend.terminate()
             await asyncio.wait_for(backend.wait(), 10)

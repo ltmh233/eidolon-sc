@@ -395,6 +395,8 @@ class ReachOut:
 Recorded = Message | ConversationEvent | ReachOut
 """What a conversation's record holds."""
 
+RecordParts = tuple[list[Message], list[ConversationEvent], list[ReachOut]]
+
 
 @dataclass(frozen=True)
 class CurrentConversation:
@@ -771,6 +773,13 @@ class Store:
         if unseen is not None:
             await self._db.write(_see_reach_outs, conversation_id, unseen)
         return entries
+
+    async def read_parts_by_user(self, conversation_id: str) -> RecordParts:
+        """The same captured read/seen watermark, leaving timeline assembly to core."""
+        parts, unseen = await self._db.read(_parts_and_unseen, conversation_id)
+        if unseen is not None:
+            await self._db.write(_see_reach_outs, conversation_id, unseen)
+        return parts
 
     async def current_conversations(self) -> list[CurrentConversation]:
         """Every user's current conversation with each character they have one with, as
@@ -1524,6 +1533,18 @@ def read_record(db: sqlite3.Connection, conversation_id: str) -> list[Recorded]:
     things happened: a turn where the user's words were said, its two messages together, an
     event or a reach-out where it happened; so one written while a turn was under way comes
     after the turn."""
+    messages, events, reach_outs = _record_parts(db, conversation_id)
+    pending: list[ConversationEvent | ReachOut] = sorted([*events, *reach_outs], key=_placed)
+    merged: list[Recorded] = []
+    for message in messages:
+        if message.role == "user":
+            while pending and _at(pending[0].created_at) < _at(message.created_at):
+                merged.append(pending.pop(0))
+        merged.append(message)
+    return merged + pending
+
+
+def _record_parts(db: sqlite3.Connection, conversation_id: str) -> RecordParts:
     messages = _list_messages(db, conversation_id)
     named = by_name(db)
     events = named.execute(
@@ -1534,16 +1555,12 @@ def read_record(db: sqlite3.Connection, conversation_id: str) -> list[Recorded]:
         f"SELECT {_REACH_OUT_COLUMNS} FROM reach_outs WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations)",
         (conversation_id,),
     ).fetchall()
-    pending: list[ConversationEvent | ReachOut] = sorted(
-        [*map(_event, events), *map(_reach_out, reach_outs)], key=_placed
-    )
-    merged: list[Recorded] = []
-    for message in messages:
-        if message.role == "user":
-            while pending and _at(pending[0].created_at) < _at(message.created_at):
-                merged.append(pending.pop(0))
-        merged.append(message)
-    return merged + pending
+    return messages, list(map(_event, events)), list(map(_reach_out, reach_outs))
+
+
+def _parts_and_unseen(db: sqlite3.Connection, conversation_id: str) -> tuple[RecordParts, int | None]:
+    parts = _record_parts(db, conversation_id)
+    return parts, _unseen_watermark(db, conversation_id, [entry.id for entry in parts[2]])
 
 
 def _record_and_unseen(
@@ -1553,14 +1570,18 @@ def _record_and_unseen(
     not have been seen; None if all have."""
     entries = read_record(db, conversation_id)
     given = [entry.id for entry in entries if isinstance(entry, ReachOut)]
+    return entries, _unseen_watermark(db, conversation_id, given)
+
+
+def _unseen_watermark(db: sqlite3.Connection, conversation_id: str, given: list[int]) -> int | None:
     if not given:
-        return entries, None
+        return None
     [(unseen,)] = db.execute(
         "SELECT EXISTS (SELECT 1 FROM reach_outs WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations) AND id <= ?"
         " AND seen = 0)",
         (conversation_id, max(given)),
     ).fetchall()
-    return entries, max(given) if unseen else None
+    return max(given) if unseen else None
 
 
 def _see_reach_outs(db: sqlite3.Connection, conversation_id: str, up_to: int) -> None:
