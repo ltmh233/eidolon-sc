@@ -62,6 +62,7 @@ from eidolon.affinity_auth import affinity_service_auth
 from eidolon.sessions import UserId, session_middleware
 from eidolon.sponsor_api import add_sponsor_routes
 from eidolon.stats import add_stats_routes
+from eidolon.stats_snapshot import add_stats_snapshot
 from eidolon.service_status import add_service_status_routes
 from eidolon.store import Conversation, ConversationEvent, IsCurrent, ReachOut, Recorded
 from eidolon.throttle import Throttled
@@ -343,6 +344,7 @@ def create_app(backend: Backend) -> FastAPI:
     add_sponsor_routes(app, backend)
     add_data_package_routes(app, backend)
     add_stats_routes(app, backend)
+    add_stats_snapshot(app, backend)
     add_service_status_routes(app, backend.service_status)
 
     @app.get("/api/ice-servers")

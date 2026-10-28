@@ -447,6 +447,18 @@ class Affinities:
         enabled = self.on
         return await self._db.read(self._sc_snapshot, user_id, character_id, enabled)
 
+    async def sc_stored_states(self, user_id: str, character_ids: Sequence[str]) -> dict[str, dict]:
+        """Raw SC rows in one read, for core statistics; no recovery or tier calculation."""
+        known = set(character_ids)
+        return await self._db.read(lambda db: {
+            character: _stored_snapshot((value, updated, cooling))
+            for character, value, updated, cooling in db.execute(
+                "SELECT character_id,value,updated_at,cooling FROM affinities WHERE user_id=?",
+                (user_id,),
+            )
+            if character in known
+        })
+
     def _sc_snapshot(self, db: sqlite3.Connection, user_id: str, character_id: str, enabled: bool) -> dict:
         now = self._clock()
         row = db.execute(
@@ -455,13 +467,7 @@ class Affinities:
         ).fetchone() if enabled else None
         state = None
         if row is not None:
-            updated = datetime.fromisoformat(row[1])
-            if updated.utcoffset() is None:
-                raise ValueError("stored affinity timestamp must be timezone-aware")
-            updated = updated.astimezone(UTC)
-            delta = updated - datetime(1970, 1, 1, tzinfo=UTC)
-            state = {"value": row[0], "updated_at_us": (delta.days * 86400 + delta.seconds) * 1000000 + delta.microseconds,
-                     "cooling": bool(row[2])}
+            state = _stored_snapshot(row)
         return {"version": 1, "work_id": "sc", "character_id": character_id,
                 "enabled": enabled, "observed_at": now.isoformat(), "state": state}
 
@@ -608,3 +614,13 @@ def _row(
     value, updated_at, cooling, gained, gained_on = row
     kept = Affinity(value, datetime.fromisoformat(updated_at), bool(cooling))
     return kept.recovered(now), gained, gained_on
+
+
+def _stored_snapshot(row) -> dict:
+    updated = datetime.fromisoformat(row[1])
+    if updated.utcoffset() is None:
+        raise ValueError("stored affinity timestamp must be timezone-aware")
+    updated = updated.astimezone(UTC)
+    delta = updated - datetime(1970, 1, 1, tzinfo=UTC)
+    return {"value": row[0], "updated_at_us": (delta.days * 86400 + delta.seconds) * 1000000 + delta.microseconds,
+            "cooling": bool(row[2])}

@@ -17,7 +17,7 @@ import (
 
 // Handler adds public catalog reads, proxying legacy endpoints without rewriting
 // bodies, cookies, Origin, redirects or streaming responses. Python owns auth.
-func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper, affinityRead ...http.Handler) http.Handler {
+func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper, readModels ...http.Handler) http.Handler {
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	proxy.Transport = transport
 	proxy.FlushInterval = -1
@@ -36,8 +36,14 @@ func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper, affini
 					return
 				}
 			}
-			if _, ok := affinity.CharacterID(q.URL.Path); ok && q.Method == "GET" && len(affinityRead) > 0 && affinityRead[0] != nil {
-				affinityRead[0].ServeHTTP(w, q)
+			// Optional native reads: affinity first, statistics second. Existing callers
+			// without these handlers retain the explicit legacy proxy mode.
+			if q.URL.Path == "/api/stats" && q.Method == "GET" && len(readModels) > 1 && readModels[1] != nil {
+				readModels[1].ServeHTTP(w, q)
+				return
+			}
+			if _, ok := affinity.CharacterID(q.URL.Path); ok && q.Method == "GET" && len(readModels) > 0 && readModels[0] != nil {
+				readModels[0].ServeHTTP(w, q)
 				return
 			}
 			// These legacy creation models ignore unknown JSON fields. Refuse an

@@ -84,7 +84,7 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
         core = await spawn("go", binary, "-listen", f"127.0.0.1:{go_port}", "-legacy", python_url,
                            "-packs", f"{ROOT}/core/packs,{ROOT}/core/testdata/packs",
                            "-content-snapshot", str(snapshot), "-catalog-display", str(display),
-                           "-affinity-token-file", str(token))
+                           "-affinity-token-file", str(token), "-stats-token-file", str(token))
         await ready(go_url + "/api/works")
         next_process = await spawn("next", "node", next_server, env={
             **os.environ, "PORT": str(next_port), "HOSTNAME": "127.0.0.1", "BACKEND_URL": go_url,
@@ -125,6 +125,13 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
                 denied = await client.get(origin + "/api/_core/affinity/mano", headers={"Authorization": "Bearer " + token.read_text()})
                 assert denied.status_code == 404 and "value" not in denied.text, origin
             print("PASS Go affinity computation through private authenticated snapshot; public raw routes denied")
+            for span in ('all', '30d', '1y'):
+                computed_stats = await client.get('/api/stats', params={'range': span}, headers={'X-Timezone': 'America/New_York'})
+                direct_stats = await client.get(python_url + '/api/stats', params={'range': span}, headers={'X-Timezone': 'America/New_York'})
+                assert computed_stats.status_code == direct_stats.status_code == 200, (span, computed_stats.text)
+                assert computed_stats.json() == direct_stats.json(), (span, computed_stats.text, direct_stats.text)
+            assert (await client.get('/api/_core/stats')).status_code == 404
+            print('PASS Go native statistics through Next with historical SC conversation and memory')
             from tests.test_sc_play_scope import gameplay_snapshot
             before_scope = gameplay_snapshot(tmp_path / "test.db")
             for boundary, origin in (("next-go-python", ""), ("direct", python_url)):
@@ -223,6 +230,7 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             print(f"OBSERVED Uvicorn ASGI spec: {sorted({q['asgi_spec'] for q in observed})}")
             assert any(q["path"] == "/api/conversations" and q["scope"] == "sc" and q["origin"] == "http://localhost" for q in observed)
             assert any(q["path"] == "/api/_core/affinity/mano" for q in observed), "Go did not request raw affinity state"
+            assert any(q["path"] == "/api/_core/stats" for q in observed), "Go did not request raw statistics"
             # Stop Python and prove the complete scoped catalog remains native to Go.
             backend.terminate()
             await asyncio.wait_for(backend.wait(), 10)

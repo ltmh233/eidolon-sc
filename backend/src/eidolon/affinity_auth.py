@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import HTTPException, Request
 
 
-def affinity_service_auth(path: Path | None):
+def core_service_auth(path: Path | None):
     credential = None
     if path is not None:
         try:
@@ -28,3 +28,7 @@ def affinity_service_auth(path: Path | None):
             raise HTTPException(404, 'Not Found')
 
     return require_service
+
+
+# Kept for callers configuring the first (affinity) read-model slice.
+affinity_service_auth = core_service_auth

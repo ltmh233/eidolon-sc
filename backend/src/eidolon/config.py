@@ -459,7 +459,7 @@ class Settings:
     with; without it, no key is kept there and the ban list is a plain hash. Users' own
     keys are kept by no one but their browsers (ADR-0017)."""
     core_service_token_path: Path | None = None
-    """Optional purpose-limited credential file for the core affinity read model."""
+    """Optional service credential file for the private core affinity/statistics reads."""
     gemini_billing_enabled: bool = False
     """The deployer says Gemini's billing is on, so its paid tier, which Google does not
     train on, embeds users' memories (ADR-0005, revised)."""
