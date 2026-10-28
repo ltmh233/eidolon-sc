@@ -78,6 +78,15 @@ func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper, readMo
 					}
 				}
 			}
+			if q.Method == "POST" && q.URL.Path == "/api/conversations" && len(readModels) > 4 && readModels[4] != nil {
+				readModels[4].ServeHTTP(w, q)
+				return
+			}
+			// ReverseProxy uploads q.Body while copying the response. An early backend
+			// rejection must not let net/http's HTTP/1 response flush close that live
+			// body behind Transport's reader. HTTP/2 is already duplex; recorders may
+			// not implement this controller operation.
+			_ = http.NewResponseController(w).EnableFullDuplex()
 			proxy.ServeHTTP(w, q)
 			return
 		}

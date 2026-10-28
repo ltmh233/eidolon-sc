@@ -38,6 +38,7 @@ type Registry struct {
 	works             map[string]Work
 	staticCharacters  map[string][]map[string]any
 	contentDigest     string
+	contentVersion    int
 	displayCharacters []map[string]any
 }
 

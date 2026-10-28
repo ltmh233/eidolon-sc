@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import HTTPException, Request
 
 
-def core_service_auth(path: Path | None):
+def load_service_token(path: Path | None) -> bytes | None:
     credential = None
     if path is not None:
         try:
@@ -19,6 +19,12 @@ def core_service_auth(path: Path | None):
                 raise ValueError()
         except (OSError, ValueError):
             raise RuntimeError('invalid affinity service credential file') from None
+
+    return credential
+
+
+def core_service_auth(path: Path | None):
+    credential = load_service_token(path)
 
     async def require_service(request: Request) -> None:
         declarations = request.headers.getlist('authorization')

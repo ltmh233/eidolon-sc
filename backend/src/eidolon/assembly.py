@@ -143,6 +143,8 @@ class Backend:
     """Exports users' data packages, and imports them."""
     reach_outs: ReachOuts
     """Has characters reach out to users once their time comes."""
+    sc_content_digest: str | None = None
+    """Trusted loaded v3 SC release identity; None in legacy or v2 mode."""
     world: World | None = None
     """The world setting; None without its data file."""
     corpus: StoryCorpus | None = None
@@ -433,6 +435,7 @@ def build(
         data_packages=DataPackages(database, store, memories, characters, gift_catalog, clock),
         reach_outs=reach_outs,
         world=world,
+        sc_content_digest=content.digest if content and content.gifts is not None else None,
         corpus=corpus,
         _closers=closers,
     )

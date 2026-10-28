@@ -16,6 +16,7 @@ import (
 
 	"eidolon/core/internal/affinity"
 	"eidolon/core/internal/catalog"
+	"eidolon/core/internal/conversationcreate"
 	"eidolon/core/internal/stats"
 	"eidolon/core/internal/timeline"
 )
@@ -28,6 +29,7 @@ func main() {
 	statsToken := flag.String("stats-token-file", "", "owner-only core service credential file; enables Go statistics reads")
 	timelineToken := flag.String("timeline-token-file", "", "owner-only core service credential file; enables Go history projection")
 	summaryToken := flag.String("summaries-token-file", "", "owner-only core service credential file; enables Go conversation summaries")
+	createToken := flag.String("sc-create-token-file", "", "separate owner-only SC creation credential; requires v3 content-snapshot")
 	scWorld := flag.String("sc-world", "", "reviewed SC world.json for offline export")
 	export := flag.String("export-worlds", "", "write private world snapshot atomically, then exit (no listener)")
 	characters := flag.String("sc-characters", "", "include SC characters TOML in a unified v2 snapshot")
@@ -112,7 +114,33 @@ func main() {
 		}
 		summaryRead = timeline.NewSummaryHandler(upstream, transport, token)
 	}
-	server := &http.Server{Addr: *listen, Handler: catalog.Handler(registry, upstream, transport, affinityRead, statsRead, timelineRead, summaryRead), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	var createCommand http.Handler
+	if *createToken != "" {
+		token, err := affinity.ReadTokenFile(*createToken)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, path := range []string{*affinityToken, *statsToken, *timelineToken, *summaryToken} {
+			if path != "" {
+				read, err := affinity.ReadTokenFile(path)
+				if err != nil {
+					log.Fatal(err)
+				}
+				if read == token {
+					log.Fatal("SC create and read credentials must be distinct")
+				}
+			}
+		}
+		digest, characters, err := catalog.SCCreateContent(registry)
+		if err != nil {
+			log.Fatal(err)
+		}
+		createCommand, err = conversationcreate.NewHandler(upstream, token, digest, characters)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	server := &http.Server{Addr: *listen, Handler: catalog.Handler(registry, upstream, transport, affinityRead, statsRead, timelineRead, summaryRead, createCommand), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	stopped := make(chan struct{})

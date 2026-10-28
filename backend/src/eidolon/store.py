@@ -667,8 +667,16 @@ class Store:
     async def save_profile(self, user_id: str, profile: ProducerProfile) -> None:
         await self._db.write(write_profile, user_id, profile)
 
-    async def create_conversation(self, user_id: str, character_id: str) -> Conversation:
-        conversation = Conversation(uuid.uuid4().hex, user_id, character_id, _now())
+    async def create_conversation(
+        self, user_id: str, character_id: str, *, conversation_id: str | None = None,
+    ) -> Conversation:
+        """Create SC once; a private command may supply its already generated UUID.
+
+        Collisions fail, never replace or regenerate. Cancellation after queuing does
+        not retract the write (ADR-0028); this is not a durable replay receipt.
+        """
+        conversation = Conversation(conversation_id if conversation_id is not None else uuid.uuid4().hex,
+                                    user_id, character_id, _now())
         await self._db.write(_insert_conversation, conversation)
         return conversation
 

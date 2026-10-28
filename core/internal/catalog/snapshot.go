@@ -167,5 +167,18 @@ func AttachContent(r *Registry, path string) error {
 	}
 	r.staticCharacters = listed
 	r.contentDigest = bundle.Digest
+	r.contentVersion = bundle.Version
 	return nil
+}
+
+// SCCreateContent exposes only identities from the verified immutable v3 release.
+func SCCreateContent(r *Registry) (string, []string, error) {
+	if r.contentVersion != 3 || r.contentDigest == "" || len(r.staticCharacters["sc"]) == 0 {
+		return "", nil, fmt.Errorf("SC creation requires v3 content-snapshot")
+	}
+	ids := make([]string, 0, len(r.staticCharacters["sc"]))
+	for _, c := range r.staticCharacters["sc"] {
+		ids = append(ids, c["local_id"].(string))
+	}
+	return r.contentDigest, ids, nil
 }

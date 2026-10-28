@@ -56,6 +56,9 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
     token = tmp_path / "core-token"
     token.write_text(secrets.token_hex(32))
     token.chmod(0o600)
+    create_token = tmp_path / "create-token"
+    create_token.write_text(secrets.token_hex(32))
+    create_token.chmod(0o600)
     result = export(CONFIG, snapshot, with_gifts=True)
     assert result.returncode == 0, result.stderr.decode()
     publish(snapshot, CONFIG, assets_url, display)
@@ -85,7 +88,8 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
                            "-packs", f"{ROOT}/core/packs,{ROOT}/core/testdata/packs",
                            "-content-snapshot", str(snapshot), "-catalog-display", str(display),
                            "-affinity-token-file", str(token), "-stats-token-file", str(token),
-                           "-timeline-token-file", str(token), "-summaries-token-file", str(token))
+                           "-timeline-token-file", str(token), "-summaries-token-file", str(token),
+                           "-sc-create-token-file", str(create_token))
         await ready(go_url + "/api/works")
         next_process = await spawn("next", "node", next_server, env={
             **os.environ, "PORT": str(next_port), "HOSTNAME": "127.0.0.1", "BACKEND_URL": go_url,
@@ -139,6 +143,11 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
                 assert summary.status_code == direct_summary.status_code == 200, (route, summary.text)
                 assert summary.json() == direct_summary.json(), (route, summary.text, direct_summary.text)
             print('PASS Go native conversation list/latest summaries through Next')
+            created = await client.post('/api/conversations', json={'character_id':'mano'}, headers={'Origin':next_url})
+            assert created.status_code == 201, created.text
+            assert set(created.json()) == {'id','user_id','character_id','created_at','title'}
+            assert (await client.get('/api/conversations/'+created.json()['id']+'/messages')).json() == []
+            print('PASS Go native SC create command through Next, exact public shape and stored empty history')
             from tests.test_sc_play_scope import gameplay_snapshot
             before_scope = gameplay_snapshot(tmp_path / "test.db")
             for boundary, origin in (("next-go-python", ""), ("direct", python_url)):
@@ -235,12 +244,15 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             print(f"METRIC three_process llm_cancel_ms={delay*1000:.3f}")
             observed = [json.loads(line) for line in (tmp_path / "requests.jsonl").read_text().splitlines()]
             print(f"OBSERVED Uvicorn ASGI spec: {sorted({q['asgi_spec'] for q in observed})}")
-            assert any(q["path"] == "/api/conversations" and q["scope"] == "sc" and q["origin"] == "http://localhost" for q in observed)
+            for phase in ("prepare", "execute"):
+                assert any(q["path"] == "/api/_core/sc-conversation-create/" + phase and q["scope"] == "sc" and q["origin"] == "http://localhost" for q in observed), phase
             assert any(q["path"] == "/api/_core/affinity/mano" for q in observed), "Go did not request raw affinity state"
             assert any(q["path"] == "/api/_core/stats" for q in observed), "Go did not request raw statistics"
             assert any(q["path"].startswith("/api/_core/conversations/") for q in observed), "Go did not request raw history"
             assert any(q["path"] == "/api/_core/conversation-summaries" for q in observed), "Go did not request raw list candidates"
             assert any(q["path"] == "/api/_core/conversation-summaries/latest" for q in observed), "Go did not request raw latest candidates"
+            assert any(q['path'] == '/api/_core/sc-conversation-create/prepare' for q in observed), 'Go did not prepare creation'
+            assert any(q['path'] == '/api/_core/sc-conversation-create/execute' for q in observed), 'Go did not execute creation'
             # Stop Python and prove the complete scoped catalog remains native to Go.
             backend.terminate()
             await asyncio.wait_for(backend.wait(), 10)

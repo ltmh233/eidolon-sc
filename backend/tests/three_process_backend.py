@@ -50,6 +50,7 @@ async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | 
         character_snapshot_path=snapshot, catalog_display_path=display,
         stand_assets_url=assets_url,
         admins=frozenset({("github", "1001")}), affinity_and_gifts=True,
+        core_sc_create_token_path=(directory / "create-token") if (directory / "create-token").exists() else None,
         core_service_token_path=(directory / "core-token") if (directory / "core-token").exists() else None,
     )
     history(settings.database_path)

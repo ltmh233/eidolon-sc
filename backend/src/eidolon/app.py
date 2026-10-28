@@ -64,6 +64,7 @@ from eidolon.sponsor_api import add_sponsor_routes
 from eidolon.stats import add_stats_routes
 from eidolon.stats_snapshot import add_stats_snapshot
 from eidolon.conversation_summaries import add_summary_routes
+from eidolon.conversation_create import NewConversation, sc_creation_request, add_create_routes
 from eidolon.store import comparison_order
 from eidolon.service_status import add_service_status_routes
 from eidolon.store import Conversation, ConversationEvent, IsCurrent, ReachOut, Recorded
@@ -89,10 +90,6 @@ def _picture(path: Path, request: Request) -> Response:
     if etag in (tag.strip() for tag in cached_etags.split(",")):
         return Response(status_code=304, headers={"ETag": etag, **_PICTURE_CACHE})
     return response
-
-
-class NewConversation(BaseModel):
-    character_id: str
 
 
 class TurnInput(BaseModel):
@@ -348,6 +345,7 @@ def create_app(backend: Backend) -> FastAPI:
     add_stats_routes(app, backend)
     add_stats_snapshot(app, backend)
     add_summary_routes(app, backend)
+    add_create_routes(app, backend)
     add_service_status_routes(app, backend.service_status)
 
     @app.get("/api/ice-servers")
@@ -488,7 +486,7 @@ def create_app(backend: Backend) -> FastAPI:
     async def clear_memories(user_id: UserId) -> None:
         await memory.clear(user_id)
 
-    @app.post("/api/conversations", status_code=201)
+    @app.post("/api/conversations", status_code=201, dependencies=[Depends(sc_creation_request)])
     async def create_conversation(body: NewConversation, user_id: UserId) -> dict:
         if body.character_id not in characters:
             raise HTTPException(404, "角色不存在")
