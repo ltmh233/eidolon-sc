@@ -18,12 +18,22 @@ type position struct {
 	kind, role   string
 	id           int64
 	at           time.Time
+	aware        bool
+	comparison   bool
 	offset, size int64
 }
 
 // Project validates the complete private stream before writing the public array.
 // Memory retains indexes and at most one record; message size is not artificially capped.
 func Project(ctx context.Context, input io.Reader, output io.Writer, conversation string) error {
+	return projectTimeline(ctx, input, output, conversation, false)
+}
+
+func projectPythonTimeline(ctx context.Context, input io.Reader, output io.Writer, conversation string) error {
+	return projectTimeline(ctx, input, output, conversation, true)
+}
+
+func projectTimeline(ctx context.Context, input io.Reader, output io.Writer, conversation string, requireComparison bool) error {
 	spool, err := temporary()
 	if err != nil {
 		return err
@@ -79,6 +89,9 @@ func Project(ctx context.Context, input io.Reader, output io.Writer, conversatio
 		if err != nil {
 			return err
 		}
+		if requireComparison && !index.comparison {
+			return invalid
+		}
 		if kind == "event" {
 			var name *string
 			if json.Unmarshal(row[2], &name) != nil {
@@ -117,6 +130,11 @@ func Project(ctx context.Context, input io.Reader, output io.Writer, conversatio
 		}
 	}
 	sort.Slice(messages, func(i, j int) bool { return messages[i].id < messages[j].id })
+	for i := 1; i < len(pending); i++ {
+		if pending[i].aware != pending[0].aware {
+			return legacyPreviewFailure
+		}
+	}
 	sort.Slice(pending, func(i, j int) bool {
 		a, b := pending[i], pending[j]
 		if !a.at.Equal(b.at) {
@@ -147,7 +165,13 @@ func Project(ctx context.Context, input io.Reader, output io.Writer, conversatio
 	cursor := 0
 	for _, m := range messages {
 		if m.role == "user" {
-			for cursor < len(pending) && pending[cursor].at.Before(m.at) {
+			for cursor < len(pending) {
+				if pending[cursor].aware != m.aware {
+					return legacyPreviewFailure
+				}
+				if !pending[cursor].at.Before(m.at) {
+					break
+				}
 				if err = write(pending[cursor]); err != nil {
 					return err
 				}
@@ -178,7 +202,12 @@ func projectRecord(kind string, data []byte) (map[string]any, position, error) {
 		"reach_out": {"id", "ja", "zh", "segments", "created_at", "type"},
 	}
 	keys, ok := fields[kind]
-	if !ok || len(raw) != len(keys) {
+	_, hasComparison := raw["comparison_order"]
+	expected := len(keys)
+	if hasComparison {
+		expected++
+	}
+	if !ok || len(raw) != expected {
 		return nil, position{}, invalid
 	}
 	for _, key := range keys {
@@ -187,15 +216,16 @@ func projectRecord(kind string, data []byte) (map[string]any, position, error) {
 		}
 	}
 	var record struct {
-		ID       int64   `json:"id"`
-		Role     string  `json:"role"`
-		Type     string  `json:"type"`
-		Kind     string  `json:"kind"`
-		Text     *string `json:"text"`
-		Ja       *string `json:"ja"`
-		Zh       *string `json:"zh"`
-		At       string  `json:"created_at"`
-		Segments []struct {
+		Comparison *comparisonOrder `json:"comparison_order"`
+		ID         int64            `json:"id"`
+		Role       string           `json:"role"`
+		Type       string           `json:"type"`
+		Kind       string           `json:"kind"`
+		Text       *string          `json:"text"`
+		Ja         *string          `json:"ja"`
+		Zh         *string          `json:"zh"`
+		At         string           `json:"created_at"`
+		Segments   []struct {
 			Ja string `json:"ja"`
 			Zh string `json:"zh"`
 		} `json:"segments"`
@@ -209,12 +239,24 @@ func projectRecord(kind string, data []byte) (map[string]any, position, error) {
 	if dec.Decode(&record) != nil || bytes.Equal(raw["id"], []byte("null")) {
 		return nil, position{}, invalid
 	}
-	at, err := time.Parse(time.RFC3339Nano, record.At)
-	if err != nil {
-		at, err = time.Parse("2006-01-02T15:04:05.999999999-07:00:00", record.At)
-	}
-	if err != nil {
-		return nil, position{}, invalid
+	var at time.Time
+	aware := true
+	if hasComparison {
+		if !validOrder(record.Comparison) {
+			return nil, position{}, invalid
+		}
+		at = time.UnixMicro(*record.Comparison.Micros)
+		aware = *record.Comparison.Aware
+	} else {
+		var err error
+		at, err = time.Parse(time.RFC3339Nano, record.At)
+		if err != nil {
+			at, err = time.Parse("2006-01-02T15:04:05.999999999-07:00:00", record.At)
+		}
+		if err != nil {
+			return nil, position{}, invalid
+		}
+		at = at.Truncate(time.Microsecond)
 	}
 	public := map[string]any{"id": record.ID, "created_at": record.At}
 	if kind == "event" {
@@ -292,5 +334,5 @@ func projectRecord(kind string, data []byte) (map[string]any, position, error) {
 			return nil, position{}, invalid
 		}
 	}
-	return public, position{kind: kind, role: record.Role, id: record.ID, at: at}, nil
+	return public, position{kind: kind, role: record.Role, id: record.ID, at: at, aware: aware, comparison: hasComparison}, nil
 }

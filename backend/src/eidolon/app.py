@@ -63,6 +63,8 @@ from eidolon.sessions import UserId, session_middleware
 from eidolon.sponsor_api import add_sponsor_routes
 from eidolon.stats import add_stats_routes
 from eidolon.stats_snapshot import add_stats_snapshot
+from eidolon.conversation_summaries import add_summary_routes
+from eidolon.store import comparison_order
 from eidolon.service_status import add_service_status_routes
 from eidolon.store import Conversation, ConversationEvent, IsCurrent, ReachOut, Recorded
 from eidolon.throttle import Throttled
@@ -345,6 +347,7 @@ def create_app(backend: Backend) -> FastAPI:
     add_data_package_routes(app, backend)
     add_stats_routes(app, backend)
     add_stats_snapshot(app, backend)
+    add_summary_routes(app, backend)
     add_service_status_routes(app, backend.service_status)
 
     @app.get("/api/ice-servers")
@@ -538,28 +541,38 @@ def create_app(backend: Backend) -> FastAPI:
 
     @app.get("/api/_core/conversations/{conversation_id}/messages", include_in_schema=False,
              dependencies=[Depends(require_core), Depends(sc_request)])
-    async def timeline_snapshot(conversation_id: str, user_id: UserId) -> Response:
+    async def timeline_snapshot(conversation_id: str, user_id: UserId, request: Request) -> Response:
         conversation = await conversation_or_404(conversation_id, user_id)
         messages, events, reach_outs = await store.read_parts_by_user(conversation.id)
         # Preserve legacy unknown-gift failure after the captured seen watermark is kept.
         if any(e.gift_id is not None and e.gift_id not in gift_catalog for e in events):
             return JSONResponse({"error": "unknown_gift"}, status_code=500)
 
+        def serialized(entry) -> dict:
+            record = asdict(entry)
+            # Negotiated metadata keeps older core consumers on their original shape.
+            if request.headers.get("X-Core-History-Comparison") == "python-us-v1":
+                record["comparison_order"] = comparison_order(record["created_at"])
+            return record
+
         def rows():
             yield ["meta", 1, "sc", conversation.id]
             for message in messages:
-                yield ["message", asdict(message.without_cues())]
+                yield ["message", serialized(message.without_cues())]
             for event in events:
-                yield ["event", asdict(event), gift_catalog[event.gift_id].name if event.gift_id is not None else None]
+                yield ["event", serialized(event), gift_catalog[event.gift_id].name if event.gift_id is not None else None]
             for reach_out in reach_outs:
-                yield ["reach_out", asdict(reach_out.without_cues())]
+                yield ["reach_out", serialized(reach_out.without_cues())]
             yield ["end"]
 
         def encoded():
             for row in rows():
                 yield json.dumps(row, ensure_ascii=False, separators=(',', ':'), allow_nan=False) + '\n'
 
-        return StreamingResponse(encoded(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
+        headers = {"Cache-Control": "no-store"}
+        if request.headers.get("X-Core-History-Comparison") == "python-us-v1":
+            headers["X-Core-History-Comparison"] = "python-us-v1"
+        return StreamingResponse(encoded(), media_type="application/x-ndjson", headers=headers)
 
     @app.post("/api/conversations/{conversation_id}/turns")
     async def text_turn(

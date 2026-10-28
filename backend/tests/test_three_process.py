@@ -85,7 +85,7 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
                            "-packs", f"{ROOT}/core/packs,{ROOT}/core/testdata/packs",
                            "-content-snapshot", str(snapshot), "-catalog-display", str(display),
                            "-affinity-token-file", str(token), "-stats-token-file", str(token),
-                           "-timeline-token-file", str(token))
+                           "-timeline-token-file", str(token), "-summaries-token-file", str(token))
         await ready(go_url + "/api/works")
         next_process = await spawn("next", "node", next_server, env={
             **os.environ, "PORT": str(next_port), "HOSTNAME": "127.0.0.1", "BACKEND_URL": go_url,
@@ -133,6 +133,12 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
                 assert computed_stats.json() == direct_stats.json(), (span, computed_stats.text, direct_stats.text)
             assert (await client.get('/api/_core/stats')).status_code == 404
             print('PASS Go native statistics through Next with historical SC conversation and memory')
+            for route, params in (('/api/conversations', {'character_id': 'mano'}), ('/api/conversations/latest', {})):
+                summary = await client.get(route, params=params)
+                direct_summary = await client.get(python_url + route, params=params)
+                assert summary.status_code == direct_summary.status_code == 200, (route, summary.text)
+                assert summary.json() == direct_summary.json(), (route, summary.text, direct_summary.text)
+            print('PASS Go native conversation list/latest summaries through Next')
             from tests.test_sc_play_scope import gameplay_snapshot
             before_scope = gameplay_snapshot(tmp_path / "test.db")
             for boundary, origin in (("next-go-python", ""), ("direct", python_url)):
@@ -233,6 +239,8 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert any(q["path"] == "/api/_core/affinity/mano" for q in observed), "Go did not request raw affinity state"
             assert any(q["path"] == "/api/_core/stats" for q in observed), "Go did not request raw statistics"
             assert any(q["path"].startswith("/api/_core/conversations/") for q in observed), "Go did not request raw history"
+            assert any(q["path"] == "/api/_core/conversation-summaries" for q in observed), "Go did not request raw list candidates"
+            assert any(q["path"] == "/api/_core/conversation-summaries/latest" for q in observed), "Go did not request raw latest candidates"
             # Stop Python and prove the complete scoped catalog remains native to Go.
             backend.terminate()
             await asyncio.wait_for(backend.wait(), 10)

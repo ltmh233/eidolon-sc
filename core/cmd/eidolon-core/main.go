@@ -27,6 +27,7 @@ func main() {
 	affinityToken := flag.String("affinity-token-file", "", "owner-only service credential file; enables Go affinity reads")
 	statsToken := flag.String("stats-token-file", "", "owner-only core service credential file; enables Go statistics reads")
 	timelineToken := flag.String("timeline-token-file", "", "owner-only core service credential file; enables Go history projection")
+	summaryToken := flag.String("summaries-token-file", "", "owner-only core service credential file; enables Go conversation summaries")
 	scWorld := flag.String("sc-world", "", "reviewed SC world.json for offline export")
 	export := flag.String("export-worlds", "", "write private world snapshot atomically, then exit (no listener)")
 	characters := flag.String("sc-characters", "", "include SC characters TOML in a unified v2 snapshot")
@@ -103,7 +104,15 @@ func main() {
 		}
 		timelineRead = timeline.NewHandler(upstream, transport, token)
 	}
-	server := &http.Server{Addr: *listen, Handler: catalog.Handler(registry, upstream, transport, affinityRead, statsRead, timelineRead), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	var summaryRead http.Handler
+	if *summaryToken != "" {
+		token, err := affinity.ReadTokenFile(*summaryToken)
+		if err != nil {
+			log.Fatal(err)
+		}
+		summaryRead = timeline.NewSummaryHandler(upstream, transport, token)
+	}
+	server := &http.Server{Addr: *listen, Handler: catalog.Handler(registry, upstream, transport, affinityRead, statsRead, timelineRead, summaryRead), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	stopped := make(chan struct{})

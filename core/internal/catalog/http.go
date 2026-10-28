@@ -37,8 +37,12 @@ func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper, readMo
 					return
 				}
 			}
-			// Optional native reads: affinity, statistics, then history. Existing callers
+			// Optional native reads: affinity, statistics, history, then summaries. Existing callers
 			// without these handlers retain the explicit legacy proxy mode.
+			if (q.URL.Path == "/api/conversations" || q.URL.Path == "/api/conversations/latest") && q.Method == "GET" && len(readModels) > 3 && readModels[3] != nil {
+				readModels[3].ServeHTTP(w, q)
+				return
+			}
 			if _, ok := timeline.ConversationID(q.URL.Path); ok && q.Method == "GET" && len(readModels) > 2 && readModels[2] != nil {
 				readModels[2].ServeHTTP(w, q)
 				return

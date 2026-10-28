@@ -396,6 +396,7 @@ Recorded = Message | ConversationEvent | ReachOut
 """What a conversation's record holds."""
 
 RecordParts = tuple[list[Message], list[ConversationEvent], list[ReachOut]]
+LastCandidates = tuple[Message | None, ConversationEvent | None, ReachOut | None, str | None]
 
 
 @dataclass(frozen=True)
@@ -716,6 +717,12 @@ class Store:
         and whether it has a reach-out the user has not seen (GLOSSARY.md「没看过的搭话」); for
         the conversation list."""
         return await self._db.read(_latest_conversations, user_id)
+
+    async def summary_candidates(
+        self, user_id: str, character_id: str | None,
+    ) -> list[tuple[Conversation, LastCandidates, bool]]:
+        """The existing indexed candidates and flags, without choosing or marking read."""
+        return await self._db.read(_summary_candidates, user_id, character_id)
 
     async def finish_photo(
         self, photo_id: str, image: bytes | None, reason: PhotoFailure | None
@@ -1338,6 +1345,10 @@ def _first_records(db: sqlite3.Connection, user_id: str) -> dict[str, datetime]:
 def _latest_conversations(
     db: sqlite3.Connection, user_id: str
 ) -> list[tuple[Conversation, Recorded | None, bool]]:
+    return [(c, _last(db, c.id), _unseen(db, c.id)) for c in _latest_conversation_objects(db, user_id)]
+
+
+def _latest_conversation_objects(db: sqlite3.Connection, user_id: str) -> list[Conversation]:
     rows = by_name(db).execute(
         "SELECT id,user_id,character_id,created_at,title FROM sc_conversations WHERE user_id = ?"
         " ORDER BY created_at DESC, rowid DESC",
@@ -1346,7 +1357,15 @@ def _latest_conversations(
     newest: dict[str, Conversation] = {}
     for row in rows:
         newest.setdefault(row["character_id"], Conversation(**row))
-    return [(c, _last(db, c.id), _unseen(db, c.id)) for c in newest.values()]
+    return list(newest.values())
+
+
+def _summary_candidates(
+    db: sqlite3.Connection, user_id: str, character_id: str | None,
+) -> list[tuple[Conversation, LastCandidates, bool]]:
+    conversations = _latest_conversation_objects(db, user_id) if character_id is None else _conversations(db, user_id, character_id)
+    return [(c, _last_candidates(db, c.id), _unseen(db, c.id) if character_id is None else read_ended(db, c.id) is not None)
+            for c in conversations]
 
 
 def _unseen(db: sqlite3.Connection, conversation_id: str) -> bool:
@@ -1360,6 +1379,21 @@ def _unseen(db: sqlite3.Connection, conversation_id: str) -> bool:
 def _last(db: sqlite3.Connection, conversation_id: str) -> Recorded | None:
     """The last thing in the record, but her ending it, as `read_record` orders them: the
     list shows her last line, and whether she sent a photo with it."""
+    message, event, reach_out, said = _last_candidates(db, conversation_id)
+    between: list[ConversationEvent | ReachOut] = []
+    if event is not None:
+        between.append(event)
+    if reach_out is not None:
+        between.append(reach_out)
+    latest = max(between, key=_placed, default=None)
+    if latest is None or message is None:
+        return latest or message
+    last_turn_said = said if said is not None else message.created_at
+    after = _at(latest.created_at) >= _at(last_turn_said)
+    return latest if after else message
+
+
+def _last_candidates(db: sqlite3.Connection, conversation_id: str) -> LastCandidates:
     named = by_name(db)
     row = named.execute(
         f"SELECT {_MESSAGE_WITH_PHOTO} WHERE m.conversation_id = ? AND m.conversation_id IN (SELECT id FROM sc_conversations)"
@@ -1377,22 +1411,12 @@ def _last(db: sqlite3.Connection, conversation_id: str) -> Recorded | None:
         " ORDER BY created_at DESC, id DESC LIMIT 1",
         (conversation_id,),
     ).fetchone()
-    between: list[ConversationEvent | ReachOut] = []
-    if event is not None:
-        between.append(_event(event))
-    if reach_out is not None:
-        between.append(_reach_out(reach_out))
-    latest = max(between, key=_placed, default=None)
-    if latest is None or message is None:
-        return latest or message
     said = db.execute(
         "SELECT created_at FROM messages WHERE conversation_id = ? AND conversation_id IN (SELECT id FROM sc_conversations) AND role = 'user'"
         " ORDER BY id DESC LIMIT 1",
         (conversation_id,),
-    ).fetchone()
-    last_turn_said = said[0] if said else message.created_at
-    after = _at(latest.created_at) >= _at(last_turn_said)  # as `read_record` places it
-    return latest if after else message
+    ).fetchone() if message is not None and (event is not None or reach_out is not None) else None
+    return message, _event(event) if event is not None else None, _reach_out(reach_out) if reach_out is not None else None, said[0] if said else None
 
 
 def add_turn(
@@ -1907,6 +1931,16 @@ def _placed(entry: ConversationEvent | ReachOut) -> tuple[datetime, bool, int]:
 
 def _at(timestamp: str) -> datetime:
     return datetime.fromisoformat(timestamp)
+
+
+def comparison_order(timestamp: str) -> dict:
+    """The parser's exact microseconds/awareness, without rewriting the stored timestamp."""
+    parsed = _at(timestamp)
+    delta = parsed.replace(tzinfo=None) - datetime(1970, 1, 1)
+    offset = parsed.utcoffset()
+    delta -= offset if offset is not None else timedelta()
+    return {"micros": (delta.days * 86400 + delta.seconds) * 1000000 + delta.microseconds,
+            "aware": offset is not None}
 
 
 def _call_ended(connected_at: str, duration_s: float) -> datetime:

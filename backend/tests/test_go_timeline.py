@@ -55,6 +55,22 @@ async def test_native_history_matches_legacy_and_cannot_read_foreign_state(make_
         actual = await gateway.get(path, params={'user_id': user_id(settings.database_path, 'other')})
         assert actual.status_code == expected.status_code == 200
         assert actual.json() == expected.json(), 'mixed same-time history'
+        for label, message_at, pending_at, reach_at in (
+            ('space ISO history', '2026-10-28 12:00:00+00:00', '2026-10-28 12:00:00+00:00', '2026-10-28 12:00:00+00:00'),
+            ('Python microsecond history ordering', '2026-10-28T12:00:00Z', '2026-10-28T12:00:00.000000001Z', '2026-10-28T12:00:00.000000000Z'),
+        ):
+            with sqlite3.connect(settings.database_path) as db:
+                db.execute('UPDATE messages SET created_at=? WHERE conversation_id=?', (message_at, conversation))
+                db.execute('UPDATE conversation_events SET created_at=? WHERE conversation_id=?', (pending_at, conversation))
+                db.execute('UPDATE reach_outs SET created_at=? WHERE conversation_id=?', (reach_at, conversation))
+            got = await gateway.get(path)
+            direct = await original.get(path)
+            assert got.status_code == direct.status_code == 200, (label, got.text)
+            assert got.json() == direct.json(), (label, got.text, direct.text)
+            assert 'comparison_order' not in got.text, label
+        with sqlite3.connect(settings.database_path) as db:
+            for table in ('messages', 'conversation_events', 'reach_outs'):
+                db.execute(f'UPDATE {table} SET created_at=? WHERE conversation_id=?', (at, conversation))
         assert 'PRIVATE_PHOTO_TAG' not in actual.text and 'liked' not in actual.text
         assert seen_in(settings.database_path, conversation) == [True]
         # Pending and failed photo states retain the original fields and optional shape.

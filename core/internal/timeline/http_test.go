@@ -28,6 +28,8 @@ func TestPrivateReadMustBeCompleteBeforePublicSuccess(t *testing.T) {
 					t.Errorf("%s: private request identity changed", c.name)
 				}
 				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set("X-Core-History-Comparison", "python-us-v1")
+
 				w.Header().Add("Set-Cookie", "a=1; HttpOnly")
 				w.Header().Add("Set-Cookie", "b=2; HttpOnly")
 				w.Write([]byte("[\"meta\",1,\"sc\",\"c\"]\n" + c.tail))
@@ -62,6 +64,8 @@ func TestNoAutomaticSecondReadAfterUpstreamDisconnect(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("X-Core-History-Comparison", "python-us-v1")
+
 		w.Write([]byte("[\"meta\",1,\"sc\",\"c\"]\n[\"end\"]\n"))
 	}))
 	defer upstream.Close()
@@ -83,6 +87,8 @@ func TestCancelClosesPrivateStreamWithoutPublishingPartialArray(t *testing.T) {
 	entered, observed, cleanup := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("X-Core-History-Comparison", "python-us-v1")
+
 		w.Write([]byte("[\"meta\",1,\"sc\",\"c\"]\n"))
 		w.(http.Flusher).Flush()
 		close(entered)
@@ -123,5 +129,19 @@ func TestCancelClosesPrivateStreamWithoutPublishingPartialArray(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("downstream stuck")
+	}
+}
+
+func TestHistoryComparisonCapabilityFailsClosed(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Write([]byte("[\"meta\",1,\"sc\",\"c\"]\n[\"end\"]\n"))
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	response := httptest.NewRecorder()
+	NewHandler(target, http.DefaultTransport, "core").ServeHTTP(response, httptest.NewRequest("GET", "/api/conversations/c/messages", nil))
+	if response.Code != 502 {
+		t.Fatal("unmatched comparison capability silently accepted", response.Code)
 	}
 }
