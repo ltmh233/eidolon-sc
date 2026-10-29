@@ -63,6 +63,7 @@ from eidolon.sessions import UserId, session_middleware
 from eidolon.sponsor_api import add_sponsor_routes
 from eidolon.stats import add_stats_routes
 from eidolon.stats_snapshot import add_stats_snapshot
+from eidolon.achievement_snapshot import add_achievement_snapshot
 from eidolon.conversation_summaries import add_summary_routes
 from eidolon.display_text_contract import DISPLAY_HEADER, DISPLAY_CONTRACT, raw_display_fields
 from eidolon.conversation_create import NewConversation, sc_creation_request, add_create_routes
@@ -345,6 +346,7 @@ def create_app(backend: Backend) -> FastAPI:
     add_data_package_routes(app, backend)
     add_stats_routes(app, backend)
     add_stats_snapshot(app, backend)
+    add_achievement_snapshot(app, backend)
     add_summary_routes(app, backend)
     add_create_routes(app, backend)
     add_service_status_routes(app, backend.service_status)

@@ -76,6 +76,12 @@ async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | 
             "INSERT INTO affinities (user_id,character_id,value,updated_at,cooling) VALUES ('u','mano',0,?,0)",
             ((backend.clock() - timedelta(hours=12)).isoformat(),),
         ).rowcount)
+    if settings.core_service_token_path:
+        def achievement_facts(db):
+            db.executemany("INSERT INTO achievement_progress VALUES ('u',?,'mano',?,NULL) ON CONFLICT(user_id,achievement,character_id) DO UPDATE SET count=excluded.count",
+                           [('turns', 17), ('call_time', 1.9), ('tier', -1), ('complete', 0)])
+            db.execute("INSERT INTO achievement_stages VALUES ('u','turns','mano',1,'20261029')")
+        await backend.database.write(achievement_facts)
     app = create_app(backend)
 
     async def observe(scope, receive, send):

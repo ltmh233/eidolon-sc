@@ -89,7 +89,7 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
                            "-content-snapshot", str(snapshot), "-catalog-display", str(display),
                            "-affinity-token-file", str(token), "-stats-token-file", str(token),
                            "-timeline-token-file", str(token), "-summaries-token-file", str(token),
-                           "-sc-create-token-file", str(create_token))
+                           "-sc-create-token-file", str(create_token), "-achievements-token-file", str(token))
         await ready(go_url + "/api/works")
         next_process = await spawn("next", "node", next_server, env={
             **os.environ, "PORT": str(next_port), "HOSTNAME": "127.0.0.1", "BACKEND_URL": go_url,
@@ -121,6 +121,20 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert len(cookies) >= 2, cookies
             assert any("eidolon_session=" in cookie and "HttpOnly" in cookie for cookie in cookies)
             assert (await client.post("/api/account/consent", json={"agree_to_terms": True, "at_least_13": True})).status_code == 204
+            from tests.test_sc_play_scope import gameplay_snapshot
+            achievement_path = '/api/characters/mano/achievements'
+            before_achievement_read = gameplay_snapshot(tmp_path / 'test.db')
+            native_achievement = await client.get(achievement_path)
+            original_achievement = await client.get(python_url + achievement_path)
+            assert native_achievement.status_code == original_achievement.status_code == 200
+            assert native_achievement.json() == original_achievement.json()
+            assert native_achievement.json()['achievements'][0]['progress'] == 17
+            assert native_achievement.json()['achievements'][1]['progress'] == 1
+            assert native_achievement.json()['achievements'][3]['progress'] == 'close'
+            assert native_achievement.json()['complete'] == {'completed_at': None, 'reset_cards': 0}
+            assert gameplay_snapshot(tmp_path / 'test.db') == before_achievement_read
+            assert (await client.get('/api/_core/achievements/mano')).status_code == 404
+            print('PASS native SC character achievement full response through fixed Next; no reward/read writes')
             affinity_path = "/api/characters/mano/affinity"
             computed = await client.get(affinity_path)
             direct_affinity = await client.get(python_url + affinity_path)

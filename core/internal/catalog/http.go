@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"eidolon/core/internal/achievements"
 	"eidolon/core/internal/affinity"
 	"eidolon/core/internal/timeline"
 )
@@ -53,6 +54,10 @@ func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper, readMo
 			}
 			if _, ok := affinity.CharacterID(q.URL.Path); ok && q.Method == "GET" && len(readModels) > 0 && readModels[0] != nil {
 				readModels[0].ServeHTTP(w, q)
+				return
+			}
+			if _, ok := achievements.CharacterID(q.URL.Path); ok && q.Method == "GET" && len(readModels) > 5 && readModels[5] != nil {
+				readModels[5].ServeHTTP(w, q)
 				return
 			}
 			// These legacy creation models ignore unknown JSON fields. Refuse an

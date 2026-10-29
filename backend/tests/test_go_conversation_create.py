@@ -254,8 +254,8 @@ def test_native_create_cli_requires_v3_and_distinct_read_credentials(settings, t
     for label, args, message in (
         ('missing snapshot', [], b'requires v3'),
         ('v2 snapshot', ['-content-snapshot',str(v2)], b'requires v3'),
-        ('read equals create', ['-content-snapshot',str(settings.character_snapshot_path),
-                               '-summaries-token-file',str(settings.core_sc_create_token_path)], b'must be distinct'),
+        ('achievement read equals create', ['-content-snapshot',str(settings.character_snapshot_path),
+                               '-achievements-token-file',str(settings.core_sc_create_token_path)], b'must be distinct'),
     ):
         result = subprocess.run(base+args,timeout=10,capture_output=True)
         assert result.returncode != 0 and message in result.stderr, (label,result.stderr)
