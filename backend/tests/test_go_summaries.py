@@ -85,6 +85,13 @@ async def test_go_summaries_match_legacy_without_seen_or_foreign_data(make_clien
             patch.setattr(eidolon.store, '_last', broken)
             assert (await gateway.get('/api/conversations', params={'character_id':'mano'})).status_code == 200
             assert (await gateway.get('/api/conversations/latest')).status_code == 200
+        expected_without_cues = (await client.get('/api/conversations', params={'character_id':'mano'})).json()
+        with monkeypatch.context() as patch:
+            patch.setattr(eidolon.store.Message, 'without_cues', broken)
+            patch.setattr(eidolon.store.ReachOut, 'without_cues', broken)
+            assert (await gateway.get('/api/conversations', params={'character_id':'mano'})).json() == expected_without_cues
+            with pytest.raises(RuntimeError):
+                await client.get('/api/conversations', params={'character_id':'mano'})
         # Photo preview is only a ready boolean; no IDs, failure reasons or tags appear.
         for status in ('pending','failed','ready'):
             with sqlite3.connect(settings.database_path) as db:
@@ -102,6 +109,17 @@ async def test_go_summaries_match_legacy_without_seen_or_foreign_data(make_clien
         assert failed.status_code == 500 and failed.text == 'Internal Server Error'
         with sqlite3.connect(settings.database_path) as db:
             db.execute("UPDATE messages SET segments='[]' WHERE conversation_id=?", (first,))
+        with sqlite3.connect(settings.database_path) as db:
+            db.execute("UPDATE reach_outs SET segments=? WHERE conversation_id=?", ('[{"ja":null,"zh":"broken"}]', second))
+        with pytest.raises(TypeError):
+            await client.get('/api/conversations', params={'character_id':'mano'})
+        failed = await gateway.get('/api/conversations', params={'character_id':'mano'})
+        assert failed.status_code == 500 and failed.text == 'Internal Server Error'
+        with sqlite3.connect(settings.database_path) as db:
+            db.execute('UPDATE reach_outs SET created_at=? WHERE conversation_id=?', ('2020-01-01T00:00:00+00:00', second))
+        await compare('/api/conversations', 'unselected malformed reach-out remains hidden', params={'character_id':'mano'})
+        with sqlite3.connect(settings.database_path) as db:
+            db.execute("UPDATE reach_outs SET segments='[]',created_at=? WHERE conversation_id=?", (at, second))
         gift = app.state.backend.gift_catalog['cake']
         app.state.backend.gift_catalog['cake'] = replace(gift, retired=True)
         await compare('/api/conversations', 'retired gift', params={'character_id':'kogane'})

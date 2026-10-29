@@ -49,7 +49,7 @@ func NewSummaryHandler(upstream *url.URL, transport http.RoundTripper, token str
 			return readTarget{path: "/api/_core/conversation-summaries/latest", identity: "latest"}, true
 		}
 		return readTarget{}, false
-	}, ProjectSummaries)
+	}, projectPythonSummaries)
 }
 
 func readHandler(upstream *url.URL, transport http.RoundTripper, token string, resolve func(*http.Request) (readTarget, bool), project readProjection) http.Handler {
@@ -84,6 +84,7 @@ func readHandler(upstream *url.URL, transport http.RoundTripper, token string, r
 			}
 		}
 		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set(displayHeader, displayContract)
 		if destination.comparisonKeys {
 			request.Header.Set("X-Core-History-Comparison", "python-us-v1")
 		}
@@ -118,7 +119,7 @@ func readHandler(upstream *url.URL, transport http.RoundTripper, token string, r
 				}
 				message := detail["detail"]
 				status := response.StatusCode
-				if message != "" && message != "Not Found" && (status == 401 || status == 403 || status == 404 || status == 409 || status == 428) {
+				if message != "" && message != "Not Found" && message != "unsupported display text contract" && (status == 401 || status == 403 || status == 404 || status == 409 || status == 428) {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(status)
 					w.Write(data)
@@ -129,6 +130,10 @@ func readHandler(upstream *url.URL, transport http.RoundTripper, token string, r
 			return
 		}
 		if strings.Split(response.Header.Get("Content-Type"), ";")[0] != "application/x-ndjson" {
+			failure(w)
+			return
+		}
+		if values := response.Header.Values(displayHeader); len(values) != 1 || values[0] != displayContract {
 			failure(w)
 			return
 		}

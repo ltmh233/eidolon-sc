@@ -41,3 +41,51 @@ func TestMalformedPrivatePhotoCannotBecomePublicObject(t *testing.T) {
 		t.Fatal("malformed private photo exposed")
 	}
 }
+
+func TestRawFieldsAreProjectedIndependently(t *testing.T) {
+	raw := `["meta",2,"sc","c","raw-fields-v1"]
+["message",{"id":1,"role":"character","text":null,"ja":" [unknown] A [x] B ","zh":"<Whatever>你好</Whatever>","created_at":"2026-10-28T00:00:00Z","segments":[{"ja":"[open <soft>x</soft>","zh":"[cue]"},{"ja":"close]","zh":" 中 "}],"affinity":null,"photo":null,"comparison_order":{"micros":1,"aware":true}}]
+["message",{"id":2,"role":"user","text":" [user] ","ja":null,"zh":null,"created_at":"2026-10-28T00:00:00Z","segments":[],"affinity":null,"photo":null,"comparison_order":{"micros":2,"aware":true}}]
+["end"]`
+	var output strings.Builder
+	if err := projectPythonTimeline(context.Background(), strings.NewReader(raw), &output, "c"); err != nil {
+		t.Fatal(err)
+	}
+	var shown []struct {
+		Text     *string
+		Ja, Zh   string
+		Segments []struct{ Ja, Zh string }
+	}
+	if err := json.Unmarshal([]byte(output.String()), &shown); err != nil {
+		t.Fatal(err)
+	}
+	if len(shown) != 2 || shown[0].Ja != "A  B" || shown[0].Zh != "你好" || shown[0].Segments[0].Ja != "[open <soft>x</soft>" || shown[0].Segments[0].Zh != "" || shown[0].Segments[1].Ja != "close]" || shown[0].Segments[1].Zh != "中" || shown[1].Text == nil || *shown[1].Text != " [user] " {
+		t.Fatal("field projection", output.String())
+	}
+}
+
+func TestVisibleTextManyClosedCues(t *testing.T) {
+	input := strings.Repeat(" [cue] 大🙂 ", 150000)
+	want := strings.Repeat("大🙂   ", 149999) + "大🙂"
+	if got := visibleText(input); got != want {
+		t.Fatal("large repeated closed cues changed visible body")
+	}
+}
+
+func TestRawUnicodeCoversMetadataAndGiftNames(t *testing.T) {
+	for _, raw := range []string{
+		`["meta",2,"sc","c","raw-fields-v1"]` + "\n" + `["event",{"id":1,"kind":"gift","created_at":"2026-10-28T00:00:00Z","affinity":null,"gift_id":"cake","liked":false,"type":"event","comparison_order":{"micros":1,"aware":true}},"\ud800"]` + "\n[\"end\"]\n",
+		`["meta",2,"sc","list","\ud800","raw-fields-v1"]` + "\n[\"end\"]\n",
+	} {
+		var output strings.Builder
+		var err error
+		if strings.Contains(raw, `"list"`) {
+			err = projectPythonSummaries(context.Background(), strings.NewReader(raw), &output, "list")
+		} else {
+			err = projectPythonTimeline(context.Background(), strings.NewReader(raw), &output, "c")
+		}
+		if err == nil || output.Len() != 0 {
+			t.Fatal("invalid Unicode outside display text accepted")
+		}
+	}
+}

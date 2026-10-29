@@ -64,6 +64,7 @@ from eidolon.sponsor_api import add_sponsor_routes
 from eidolon.stats import add_stats_routes
 from eidolon.stats_snapshot import add_stats_snapshot
 from eidolon.conversation_summaries import add_summary_routes
+from eidolon.display_text_contract import DISPLAY_HEADER, DISPLAY_CONTRACT, raw_display_fields
 from eidolon.conversation_create import NewConversation, sc_creation_request, add_create_routes
 from eidolon.store import comparison_order
 from eidolon.service_status import add_service_status_routes
@@ -543,6 +544,7 @@ def create_app(backend: Backend) -> FastAPI:
     @app.get("/api/_core/conversations/{conversation_id}/messages", include_in_schema=False,
              dependencies=[Depends(require_core), Depends(sc_request)])
     async def timeline_snapshot(conversation_id: str, user_id: UserId, request: Request) -> Response:
+        raw_fields = raw_display_fields(request)
         conversation = await conversation_or_404(conversation_id, user_id)
         messages, events, reach_outs = await store.read_parts_by_user(conversation.id)
         # Preserve legacy unknown-gift failure after the captured seen watermark is kept.
@@ -557,13 +559,13 @@ def create_app(backend: Backend) -> FastAPI:
             return record
 
         def rows():
-            yield ["meta", 1, "sc", conversation.id]
+            yield ["meta", 2, "sc", conversation.id, DISPLAY_CONTRACT] if raw_fields else ["meta", 1, "sc", conversation.id]
             for message in messages:
-                yield ["message", serialized(message.without_cues())]
+                yield ["message", serialized(message if raw_fields else message.without_cues())]
             for event in events:
                 yield ["event", serialized(event), gift_catalog[event.gift_id].name if event.gift_id is not None else None]
             for reach_out in reach_outs:
-                yield ["reach_out", serialized(reach_out.without_cues())]
+                yield ["reach_out", serialized(reach_out if raw_fields else reach_out.without_cues())]
             yield ["end"]
 
         def encoded():
@@ -571,6 +573,8 @@ def create_app(backend: Backend) -> FastAPI:
                 yield json.dumps(row, ensure_ascii=False, separators=(',', ':'), allow_nan=False) + '\n'
 
         headers = {"Cache-Control": "no-store"}
+        if raw_fields:
+            headers[DISPLAY_HEADER] = DISPLAY_CONTRACT
         if request.headers.get("X-Core-History-Comparison") == "python-us-v1":
             headers["X-Core-History-Comparison"] = "python-us-v1"
         return StreamingResponse(encoded(), media_type="application/x-ndjson", headers=headers)

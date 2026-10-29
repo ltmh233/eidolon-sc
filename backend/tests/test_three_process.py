@@ -228,7 +228,7 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             started = time.monotonic()
             events = []
             first = None
-            async with client.stream("POST", route, json={"text": "こんにちは"}) as response:
+            async with client.stream("POST", route, json={"text": "こんにちは [user brackets]"}) as response:
                 assert response.status_code == 200
                 async for line in response.aiter_lines():
                     if line.startswith("data: "):
@@ -240,7 +240,19 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert events[-1]["type"] == "done"
             print(f"METRIC three_process first_ms={first*1000:.3f}")
             history = f"/api/conversations/{conversation}/messages"
-            assert (await client.get(history)).json() == (await client.get(python_url + history)).json()
+            projected_history = await client.get(history)
+            assert projected_history.json() == (await client.get(python_url + history)).json()
+            assert '[user brackets]' in projected_history.text and 'PRIVATE_CHAIN_CUE' not in projected_history.text and '<soft>' not in projected_history.text
+            import sqlite3
+            with sqlite3.connect(tmp_path / 'test.db') as db:
+                raw_character = db.execute("SELECT ja,zh,segments,created_at FROM messages WHERE conversation_id=? AND role='character' ORDER BY id DESC LIMIT 1", (conversation,)).fetchone()
+                assert raw_character and '[PRIVATE_CHAIN_CUE]' in raw_character[0] and '<soft>' in raw_character[1] and 'PRIVATE_CHAIN_CUE' in raw_character[2]
+                db.execute('INSERT INTO reach_outs(conversation_id,ja,zh,segments,created_at) VALUES (?,?,?,?,?)', (conversation, '[PRIVATE_CHAIN_REACH] 搭话', '<soft>回复</soft>', json.dumps([{'ja':'[PRIVATE_CHAIN_REACH] 搭话','zh':'<soft>回复</soft>'}]), raw_character[3]))
+            for preview_route, preview_params in (('/api/conversations', {'character_id':'mano'}), ('/api/conversations/latest', {})):
+                preview = await client.get(preview_route, params=preview_params)
+                assert preview.status_code == 200 and preview.json() == (await client.get(python_url + preview_route, params=preview_params)).json()
+                assert 'PRIVATE_CHAIN_' not in preview.text and '<soft>' not in preview.text
+            print('PASS complete raw character/reach-out cues retained in SQLite, Go filtered history/list/latest through fixed production Next; user brackets kept')
             disconnected = None
             async with client.stream("POST", route, json={"text": "cancel-stream"}) as response:
                 assert response.status_code == 200

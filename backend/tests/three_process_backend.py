@@ -58,7 +58,7 @@ async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | 
         db.execute("INSERT INTO sign_in_methods VALUES ('u','github','1001','producer',NULL,'2020-01-01')")
     migration = migrate(settings.database_path, directory / "before.db", ("sc", "demo"))
     backend = build_faked(
-        settings, ObservedLLM(*[["<ja>はい。</ja><zh>好的。</zh>"]] * 5),
+        settings, ObservedLLM(*[["<ja>[PRIVATE_CHAIN_CUE] はい。</ja><zh><soft>好的。</soft></zh>"]] * 5),
         speech=FakeSpeech(), identity_providers={"github": github},
         own_llm_service=FakeLLMService(), catalog_transport=FakeCatalog().transport(),
         embedder=FakeEmbedder(), reranker=FakeReranker(), retrieval_judge=FakeJudge(),

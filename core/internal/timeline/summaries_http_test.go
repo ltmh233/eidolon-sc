@@ -17,12 +17,12 @@ func TestSummaryHTTPContractsCannotExposePrivateData(t *testing.T) {
 		name, path, body string
 		status, expected int
 	}{
-		{"empty list", "/api/conversations?character_id=mano", "[\"meta\",1,\"sc\",\"list\",\"u\"]\n[\"end\"]\n", 200, 200},
-		{"empty latest", "/api/conversations/latest", "[\"meta\",1,\"sc\",\"latest\",null]\n[\"end\"]\n", 200, 200},
+		{"empty list", "/api/conversations?character_id=mano", "[\"meta\",2,\"sc\",\"list\",\"u\",\"raw-fields-v1\"]\n[\"end\"]\n", 200, 200},
+		{"empty latest", "/api/conversations/latest", "[\"meta\",2,\"sc\",\"latest\",null,\"raw-fields-v1\"]\n[\"end\"]\n", 200, 200},
 		{"missing parameter", "/api/conversations", missing, 422, 422},
 		{"private extra in validation", "/api/conversations", strings.Replace(missing, `"type":`, `"raw_preview":"secret","type":`, 1), 422, 502},
-		{"truncated list", "/api/conversations?character_id=mano", "[\"meta\",1,\"sc\",\"list\",\"u\"]\n", 200, 502},
-		{"trailing private record", "/api/conversations/latest", "[\"meta\",1,\"sc\",\"latest\",null]\n[\"end\"]\n[\"raw_preview\",42]\n", 200, 502},
+		{"truncated list", "/api/conversations?character_id=mano", "[\"meta\",2,\"sc\",\"list\",\"u\",\"raw-fields-v1\"]\n", 200, 502},
+		{"trailing private record", "/api/conversations/latest", "[\"meta\",2,\"sc\",\"latest\",null,\"raw-fields-v1\"]\n[\"end\"]\n[\"raw_preview\",42]\n", 200, 502},
 	} {
 		func() {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +34,7 @@ func TestSummaryHTTPContractsCannotExposePrivateData(t *testing.T) {
 					t.Errorf("%s: identity/path changed", c.name)
 				}
 				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set(displayHeader, displayContract)
 				w.Header().Add("Set-Cookie", "a=1; HttpOnly")
 				w.Header().Add("Set-Cookie", "b=2; HttpOnly")
 				w.WriteHeader(c.status)
@@ -57,7 +58,8 @@ func TestSummaryCancellationClosesUpstreamWithoutPublishingArray(t *testing.T) {
 	entered, observed, cleanup := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
-		w.Write([]byte("[\"meta\",1,\"sc\",\"latest\",null]\n"))
+		w.Header().Set(displayHeader, displayContract)
+		w.Write([]byte("[\"meta\",2,\"sc\",\"latest\",null,\"raw-fields-v1\"]\n"))
 		w.(http.Flusher).Flush()
 		close(entered)
 		select {

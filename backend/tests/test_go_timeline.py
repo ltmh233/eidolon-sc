@@ -88,6 +88,14 @@ async def test_native_history_matches_legacy_and_cannot_read_foreign_state(make_
             for record_type in (Message, ConversationEvent, ReachOut):
                 patch.setattr(record_type, 'shown', broken)
             assert (await gateway.get(path)).status_code == 200, 'Go must own projection'
+        expected_without_cues = (await original.get(path)).json()
+        with monkeypatch.context() as patch:
+            patch.setattr(Message, 'without_cues', broken)
+            patch.setattr(ReachOut, 'without_cues', broken)
+            assert (await gateway.get(path)).json() == expected_without_cues, 'v2 owns text filtering'
+            with pytest.raises(RuntimeError):
+                await original.get(path)
+
         large_text = '大单条🙂' * 300000
         with sqlite3.connect(settings.database_path) as db:
             db.execute("INSERT INTO messages(conversation_id,role,text,created_at) VALUES (?,'user',?,?)", (conversation, large_text, at))

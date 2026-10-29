@@ -33,7 +33,7 @@ func projectPythonTimeline(ctx context.Context, input io.Reader, output io.Write
 	return projectTimeline(ctx, input, output, conversation, true)
 }
 
-func projectTimeline(ctx context.Context, input io.Reader, output io.Writer, conversation string, requireComparison bool) error {
+func projectTimeline(ctx context.Context, input io.Reader, output io.Writer, conversation string, rawFields bool) error {
 	spool, err := temporary()
 	if err != nil {
 		return err
@@ -58,6 +58,13 @@ func projectTimeline(ctx context.Context, input io.Reader, output io.Writer, con
 		if err != nil || ended || len(row) == 0 {
 			return invalid
 		}
+		if rawFields {
+			for _, field := range row {
+				if !validRawUnicode(field) {
+					return invalid
+				}
+			}
+		}
 		var kind string
 		if json.Unmarshal(row[0], &kind) != nil {
 			return invalid
@@ -65,8 +72,18 @@ func projectTimeline(ctx context.Context, input io.Reader, output io.Writer, con
 		if !started {
 			var version int
 			var work, id string
-			if len(row) != 4 || kind != "meta" || json.Unmarshal(row[1], &version) != nil || version != 1 || json.Unmarshal(row[2], &work) != nil || work != "sc" || json.Unmarshal(row[3], &id) != nil || id != conversation {
+			expectedMeta, expectedVersion := 4, 1
+			if rawFields {
+				expectedMeta, expectedVersion = 5, 2
+			}
+			if len(row) != expectedMeta || kind != "meta" || json.Unmarshal(row[1], &version) != nil || version != expectedVersion || json.Unmarshal(row[2], &work) != nil || work != "sc" || json.Unmarshal(row[3], &id) != nil || id != conversation {
 				return invalid
+			}
+			if rawFields {
+				var contract string
+				if json.Unmarshal(row[4], &contract) != nil || contract != displayContract {
+					return invalid
+				}
 			}
 			started = true
 			continue
@@ -85,11 +102,12 @@ func projectTimeline(ctx context.Context, input io.Reader, output io.Writer, con
 		if len(row) != expected {
 			return invalid
 		}
-		public, index, err := projectRecord(kind, row[1])
+		public, index, err := projectRecordFields(kind, row[1], rawFields)
 		if err != nil {
 			return err
 		}
-		if requireComparison && !index.comparison {
+		// The raw v2 history contract also requires Python comparison keys.
+		if rawFields && !index.comparison {
 			return invalid
 		}
 		if kind == "event" {
@@ -191,7 +209,7 @@ func projectTimeline(ctx context.Context, input io.Reader, output io.Writer, con
 	return err
 }
 
-func projectRecord(kind string, data []byte) (map[string]any, position, error) {
+func projectRecordFields(kind string, data []byte, rawFields bool) (map[string]any, position, error) {
 	var raw map[string]json.RawMessage
 	if json.Unmarshal(data, &raw) != nil {
 		return nil, position{}, invalid
@@ -213,6 +231,24 @@ func projectRecord(kind string, data []byte) (map[string]any, position, error) {
 	for _, key := range keys {
 		if _, ok = raw[key]; !ok {
 			return nil, position{}, invalid
+		}
+	}
+	if rawFields && kind != "event" {
+		var role string
+		json.Unmarshal(raw["role"], &role)
+		if kind == "reach_out" || role == "character" {
+			var segments []map[string]json.RawMessage
+			if json.Unmarshal(raw["segments"], &segments) != nil {
+				return nil, position{}, invalid
+			}
+			for _, segment := range segments {
+				for _, language := range []string{"ja", "zh"} {
+					var value *string
+					if json.Unmarshal(segment[language], &value) != nil || value == nil {
+						return nil, position{}, invalid
+					}
+				}
+			}
 		}
 	}
 	var record struct {
@@ -272,6 +308,20 @@ func projectRecord(kind string, data []byte) (map[string]any, position, error) {
 	} else {
 		if record.Segments == nil {
 			return nil, position{}, invalid
+		}
+		if rawFields && (kind == "reach_out" || record.Role == "character") {
+			if record.Ja != nil {
+				value := visibleText(*record.Ja)
+				record.Ja = &value
+			}
+			if record.Zh != nil {
+				value := visibleText(*record.Zh)
+				record.Zh = &value
+			}
+			for i := range record.Segments {
+				record.Segments[i].Ja = visibleText(record.Segments[i].Ja)
+				record.Segments[i].Zh = visibleText(record.Segments[i].Zh)
+			}
 		}
 		public["ja"] = record.Ja
 		public["zh"] = record.Zh

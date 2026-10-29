@@ -60,16 +60,41 @@ type comparisonOrder struct {
 // ProjectSummaries preserves Python's indexed conversation order; only the last-record
 // choice and public preview/summary projection move here. The caller buffers privately.
 func ProjectSummaries(ctx context.Context, input io.Reader, output io.Writer, mode string) error {
+	return projectSummaries(ctx, input, output, mode, false)
+}
+
+func projectPythonSummaries(ctx context.Context, input io.Reader, output io.Writer, mode string) error {
+	return projectSummaries(ctx, input, output, mode, true)
+}
+
+func projectSummaries(ctx context.Context, input io.Reader, output io.Writer, mode string, rawFields bool) error {
 	decoder := json.NewDecoder(input)
 	var meta []json.RawMessage
-	if decoder.Decode(&meta) != nil || len(meta) != 5 {
+	expectedMeta, expectedVersion := 5, 1
+	if rawFields {
+		expectedMeta, expectedVersion = 6, 2
+	}
+	if decoder.Decode(&meta) != nil || len(meta) != expectedMeta {
 		return invalid
+	}
+	if rawFields {
+		for _, field := range meta {
+			if !validRawUnicode(field) {
+				return invalid
+			}
+		}
 	}
 	var kind, work, receivedMode string
 	var version int
 	var user *string
-	if json.Unmarshal(meta[0], &kind) != nil || kind != "meta" || json.Unmarshal(meta[1], &version) != nil || version != 1 || json.Unmarshal(meta[2], &work) != nil || work != "sc" || json.Unmarshal(meta[3], &receivedMode) != nil || receivedMode != mode || (mode != "list" && mode != "latest") || json.Unmarshal(meta[4], &user) != nil {
+	if json.Unmarshal(meta[0], &kind) != nil || kind != "meta" || json.Unmarshal(meta[1], &version) != nil || version != expectedVersion || json.Unmarshal(meta[2], &work) != nil || work != "sc" || json.Unmarshal(meta[3], &receivedMode) != nil || receivedMode != mode || (mode != "list" && mode != "latest") || json.Unmarshal(meta[4], &user) != nil {
 		return invalid
+	}
+	if rawFields {
+		var contract string
+		if json.Unmarshal(meta[5], &contract) != nil || contract != displayContract {
+			return invalid
+		}
 	}
 	if mode == "list" && (user == nil || *user == "") || mode == "latest" && user != nil {
 		return invalid
@@ -86,6 +111,13 @@ func ProjectSummaries(ctx context.Context, input io.Reader, output io.Writer, mo
 		var row []json.RawMessage
 		if decoder.Decode(&row) != nil || len(row) == 0 || json.Unmarshal(row[0], &kind) != nil {
 			return invalid
+		}
+		if rawFields {
+			for _, field := range row {
+				if !validRawUnicode(field) {
+					return invalid
+				}
+			}
 		}
 		if kind == "end" {
 			if len(row) != 1 {
@@ -131,7 +163,7 @@ func ProjectSummaries(ctx context.Context, input io.Reader, output io.Writer, mo
 				return invalid
 			}
 		}
-		preview, err := lastPreview(candidates)
+		preview, err := lastPreviewFields(candidates, rawFields)
 		if err != nil {
 			return err
 		}
@@ -183,7 +215,7 @@ func compareOrder(a, b *comparisonOrder) (int, error) {
 	}
 	return cmp.Compare(*a.Micros, *b.Micros), nil
 }
-func lastPreview(c previewCandidates) (any, error) {
+func lastPreviewFields(c previewCandidates, rawFields bool) (any, error) {
 	if c.OrderingError {
 		return nil, legacyPreviewFailure
 	}
@@ -239,6 +271,9 @@ func lastPreview(c previewCandidates) (any, error) {
 		if r.DisplayError {
 			return nil, legacyPreviewFailure
 		}
+		if rawFields {
+			r.Ja, r.Zh = visibleText(r.Ja), visibleText(r.Zh)
+		}
 		return map[string]any{"role": "character", "text": nil, "ja": r.Ja, "zh": r.Zh, "created_at": r.At, "reach_out": true}, nil
 	}
 	if c.Message == nil {
@@ -247,6 +282,16 @@ func lastPreview(c previewCandidates) (any, error) {
 	m := c.Message
 	if m.DisplayError {
 		return nil, legacyPreviewFailure
+	}
+	if rawFields && m.Role == "character" {
+		if m.Ja != nil {
+			value := visibleText(*m.Ja)
+			m.Ja = &value
+		}
+		if m.Zh != nil {
+			value := visibleText(*m.Zh)
+			m.Zh = &value
+		}
 	}
 	shown := map[string]any{"role": m.Role, "text": m.Text, "ja": m.Ja, "zh": m.Zh, "created_at": m.At}
 	if m.PhotoStatus != nil && *m.PhotoStatus == "ready" {

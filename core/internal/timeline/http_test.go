@@ -28,11 +28,12 @@ func TestPrivateReadMustBeCompleteBeforePublicSuccess(t *testing.T) {
 					t.Errorf("%s: private request identity changed", c.name)
 				}
 				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set(displayHeader, displayContract)
 				w.Header().Set("X-Core-History-Comparison", "python-us-v1")
 
 				w.Header().Add("Set-Cookie", "a=1; HttpOnly")
 				w.Header().Add("Set-Cookie", "b=2; HttpOnly")
-				w.Write([]byte("[\"meta\",1,\"sc\",\"c\"]\n" + c.tail))
+				w.Write([]byte("[\"meta\",2,\"sc\",\"c\",\"raw-fields-v1\"]\n" + c.tail))
 			}))
 			defer upstream.Close()
 			target, _ := url.Parse(upstream.URL)
@@ -64,9 +65,10 @@ func TestNoAutomaticSecondReadAfterUpstreamDisconnect(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set(displayHeader, displayContract)
 		w.Header().Set("X-Core-History-Comparison", "python-us-v1")
 
-		w.Write([]byte("[\"meta\",1,\"sc\",\"c\"]\n[\"end\"]\n"))
+		w.Write([]byte("[\"meta\",2,\"sc\",\"c\",\"raw-fields-v1\"]\n[\"end\"]\n"))
 	}))
 	defer upstream.Close()
 	target, _ := url.Parse(upstream.URL)
@@ -87,9 +89,10 @@ func TestCancelClosesPrivateStreamWithoutPublishingPartialArray(t *testing.T) {
 	entered, observed, cleanup := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set(displayHeader, displayContract)
 		w.Header().Set("X-Core-History-Comparison", "python-us-v1")
 
-		w.Write([]byte("[\"meta\",1,\"sc\",\"c\"]\n"))
+		w.Write([]byte("[\"meta\",2,\"sc\",\"c\",\"raw-fields-v1\"]\n"))
 		w.(http.Flusher).Flush()
 		close(entered)
 		select {
@@ -135,7 +138,8 @@ func TestCancelClosesPrivateStreamWithoutPublishingPartialArray(t *testing.T) {
 func TestHistoryComparisonCapabilityFailsClosed(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
-		w.Write([]byte("[\"meta\",1,\"sc\",\"c\"]\n[\"end\"]\n"))
+		w.Header().Set(displayHeader, displayContract)
+		w.Write([]byte("[\"meta\",2,\"sc\",\"c\",\"raw-fields-v1\"]\n[\"end\"]\n"))
 	}))
 	defer upstream.Close()
 	target, _ := url.Parse(upstream.URL)
@@ -143,5 +147,77 @@ func TestHistoryComparisonCapabilityFailsClosed(t *testing.T) {
 	NewHandler(target, http.DefaultTransport, "core").ServeHTTP(response, httptest.NewRequest("GET", "/api/conversations/c/messages", nil))
 	if response.Code != 502 {
 		t.Fatal("unmatched comparison capability silently accepted", response.Code)
+	}
+}
+
+func TestRawDisplayNegotiationFailsClosed(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		ack    []string
+		meta   string
+		status int
+	}{
+		{"old Python", nil, `["meta",1,"sc","c"]`, 200},
+		{"stripped ack", nil, `["meta",2,"sc","c","raw-fields-v1"]`, 200},
+		{"duplicate ack", []string{"raw-fields-v1", "raw-fields-v1"}, `["meta",2,"sc","c","raw-fields-v1"]`, 200},
+		{"combined ack", []string{"raw-fields-v1, raw-fields-v1"}, `["meta",2,"sc","c","raw-fields-v1"]`, 200},
+		{"unknown ack", []string{"future"}, `["meta",2,"sc","c","raw-fields-v1"]`, 200},
+		{"old meta", []string{"raw-fields-v1"}, `["meta",1,"sc","c"]`, 200},
+		{"unknown contract", []string{"raw-fields-v1"}, `["meta",2,"sc","c","future"]`, 200},
+		{"protocol refusal", nil, `{"detail":"unsupported display text contract"}`, 409},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			reads := 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reads++
+				if r.Header.Values(displayHeader)[0] != displayContract || len(r.Header.Values(displayHeader)) != 1 {
+					t.Error("client chose private capability")
+				}
+				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set("X-Core-History-Comparison", "python-us-v1")
+				for _, value := range c.ack {
+					w.Header().Add(displayHeader, value)
+				}
+				w.WriteHeader(c.status)
+				w.Write([]byte(c.meta + "\n[\"end\"]\n"))
+			}))
+			defer upstream.Close()
+			target, _ := url.Parse(upstream.URL)
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest("GET", "/api/conversations/c/messages", nil)
+			request.Header.Add(displayHeader, "client-forged")
+			NewHandler(target, http.DefaultTransport, "core").ServeHTTP(response, request)
+			if response.Code != 502 || reads != 1 || response.Header().Get(displayHeader) != "" || response.Body.String() != "{\"detail\":\"SC history unavailable\"}\n" {
+				t.Fatal(response.Code, reads, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestRawUnicodeIsValidatedBeforeJSONReplacement(t *testing.T) {
+	for _, c := range []struct {
+		name, field string
+		status      int
+	}{
+		{"paired surrogate", `"\ud83d\ude42"`, 200}, {"literal escaped surrogate", `"\\ud800"`, 200},
+		{"unpaired high", `"\ud800"`, 502}, {"unpaired low", `"\udc00"`, 502}, {"high then nonlow", `"\ud800\u0061"`, 502},
+		{"invalid UTF8", "\"" + string([]byte{0xff}) + "\"", 502},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			raw := `["meta",2,"sc","c","raw-fields-v1"]` + "\n" + `["message",{"id":1,"role":"character","text":null,"ja":` + c.field + `,"zh":"","created_at":"2026-10-28T00:00:00Z","segments":[],"affinity":null,"photo":null,"comparison_order":{"micros":1,"aware":true}}]` + "\n[\"end\"]\n"
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.Header().Set(displayHeader, displayContract)
+				w.Header().Set("X-Core-History-Comparison", "python-us-v1")
+				w.Write([]byte(raw))
+			}))
+			defer upstream.Close()
+			target, _ := url.Parse(upstream.URL)
+			response := httptest.NewRecorder()
+			NewHandler(target, http.DefaultTransport, "core").ServeHTTP(response, httptest.NewRequest("GET", "/api/conversations/c/messages", nil))
+			if response.Code != c.status {
+				t.Fatal(response.Code, response.Body.String())
+			}
+		})
 	}
 }

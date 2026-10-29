@@ -43,3 +43,32 @@ async def test_private_record_has_raw_groups_and_marks_only_captured_watermark(m
     assert sum(row[0] == 'reach_out' for row in rows) == 1
     assert 'NEW_AFTER_READ' not in response.text
     assert seen_in(settings.database_path, conversation) == [True, False]
+
+
+async def test_display_negotiation_precedes_seen_and_keeps_legacy_filtering(make_client, settings):
+    client = make_client(FakeLLM())
+    conversation = await start_conversation(client)
+    reached(settings.database_path, conversation, FakeClock().now, '[PRIVATE_CUE] raw')
+    path = f'/api/_core/conversations/{conversation}/messages'
+    for credential in (None, 'wrong'):
+        headers = {'X-Core-Display-Text':'raw-fields-v1'}
+        if credential:
+            headers['Authorization'] = 'Bearer ' + credential
+        refused = await client.get(path, headers=headers)
+        assert refused.status_code == 404 and 'PRIVATE_CUE' not in refused.text
+        assert seen_in(settings.database_path, conversation) == [False]
+    unauthenticated = make_client(FakeLLM(), user=None)
+    refused = await unauthenticated.get(path, headers={'Authorization':'Bearer ' + TOKEN, 'X-Core-Display-Text':'raw-fields-v1'})
+    assert refused.status_code == 401 and 'PRIVATE_CUE' not in refused.text
+    assert seen_in(settings.database_path, conversation) == [False]
+    for values in (['unknown'], ['raw-fields-v1, raw-fields-v1'], ['raw-fields-v1', 'raw-fields-v1']):
+        headers = [('Authorization', 'Bearer ' + TOKEN)] + [('X-Core-Display-Text', value) for value in values]
+        response = await client.get(path, headers=headers)
+        assert response.status_code == 409 and response.json() == {'detail': 'unsupported display text contract'}, values
+        assert seen_in(settings.database_path, conversation) == [False], values
+    legacy = await client.get(path, headers={'Authorization': 'Bearer ' + TOKEN})
+    assert '[PRIVATE_CUE]' not in legacy.text and json.loads(legacy.text.splitlines()[0])[1] == 1
+    raw = await client.get(path, headers={'Authorization': 'Bearer ' + TOKEN, 'X-Core-Display-Text': 'raw-fields-v1'})
+    assert raw.headers['X-Core-Display-Text'] == 'raw-fields-v1'
+    assert json.loads(raw.text.splitlines()[0]) == ['meta', 2, 'sc', conversation, 'raw-fields-v1']
+    assert '[PRIVATE_CUE]' in raw.text
