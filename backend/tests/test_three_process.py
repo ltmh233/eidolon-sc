@@ -149,6 +149,21 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert (await client.get('/api/conversations/'+created.json()['id']+'/messages')).json() == []
             print('PASS Go native SC create command through Next, exact public shape and stored empty history')
             from tests.test_sc_play_scope import gameplay_snapshot
+            fresh = await client.post('/api/conversations', json={'character_id':'mano'})
+            assert fresh.status_code == 201, fresh.text
+            deletion = '/api/conversations/' + created.json()['id']
+            before_delete_scope = gameplay_snapshot(tmp_path / 'test.db')
+            for boundary, origin in (('next-go-python',''), ('direct',python_url)):
+                for headers, params in (({'X-Work-ID':'demo'}, None),
+                                        ({}, 'work_id=sc&work_id=demo')):
+                    denied = await client.delete(origin + deletion, headers=headers, params=params)
+                    assert denied.status_code == 409, (boundary,headers,params,denied.text)
+                    assert gameplay_snapshot(tmp_path / 'test.db') == before_delete_scope, (boundary,headers,params)
+            deleted = await client.delete(deletion, headers={'X-Work-ID':'sc'}, params={'work_id':'sc'})
+            assert deleted.status_code == 204 and deleted.content == b''
+            assert (await client.delete(deletion)).status_code == 404
+            assert (await client.delete('/api/conversations/' + fresh.json()['id'])).status_code == 409
+            print('PASS bodyless SC deletion: scope zero writes, historical204/repeat404/current409 through production Next')
             before_scope = gameplay_snapshot(tmp_path / "test.db")
             for boundary, origin in (("next-go-python", ""), ("direct", python_url)):
                 for path, body in (
@@ -192,7 +207,10 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert not (tmp_path / "memory-leaked").exists(), "foreign work memory reached model"
             for boundary, hidden_id in (("cross-work", info["hidden"]), ("cross-user", info["other"])):
                 assert (await client.get(f"/api/conversations/{hidden_id}/messages")).status_code == 404, (boundary, "GET messages")
-                assert (await client.delete(f"/api/conversations/{hidden_id}")).status_code == 404, (boundary, "DELETE")
+                before_foreign_delete = gameplay_snapshot(tmp_path / 'test.db')
+                refused_delete = await client.delete(f"/api/conversations/{hidden_id}")
+                assert refused_delete.status_code == 404 and refused_delete.json() == {'detail':'对话不存在'}, (boundary, 'DELETE', refused_delete.text)
+                assert gameplay_snapshot(tmp_path / 'test.db') == before_foreign_delete, (boundary, 'DELETE wrote business state')
                 assert (await client.post(f"/api/conversations/{hidden_id}/turns", json={"text": "must refuse"})).status_code == 404, (boundary, "POST turns")
             print("PASS migrated SC history read/resume; cross-work/user HTTP read/write/delete rejected")
             created = await client.post("/api/conversations", json={"character_id": "mano"}, headers={"X-Work-ID": "sc"})

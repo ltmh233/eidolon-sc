@@ -67,7 +67,7 @@ from eidolon.conversation_summaries import add_summary_routes
 from eidolon.conversation_create import NewConversation, sc_creation_request, add_create_routes
 from eidolon.store import comparison_order
 from eidolon.service_status import add_service_status_routes
-from eidolon.store import Conversation, ConversationEvent, IsCurrent, ReachOut, Recorded
+from eidolon.store import Conversation, ConversationEvent, IsCurrent, NotFound, ReachOut, Recorded
 from eidolon.throttle import Throttled
 from eidolon.turn_outcome import TurnOutcome
 from eidolon.usage import OverLimit
@@ -520,13 +520,16 @@ def create_app(backend: Backend) -> FastAPI:
             for c, last, unseen in await store.latest_conversations(user_id)
         ]
 
-    @app.delete("/api/conversations/{conversation_id}", status_code=204)
+    @app.delete("/api/conversations/{conversation_id}", status_code=204,
+                dependencies=[Depends(sc_request)])
     async def delete_conversation(conversation_id: str, user_id: UserId) -> None:
         """Delete a past conversation (GLOSSARY.md「历史对话」), for good; her current one is
         not deleted (409)."""
         conversation = await conversation_or_404(conversation_id, user_id)
         try:
             await store.delete_conversation(conversation)
+        except NotFound:
+            raise HTTPException(404, "对话不存在") from None
         except IsCurrent:
             raise HTTPException(409, "当前对话不能删除") from None
 
