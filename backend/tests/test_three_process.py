@@ -37,6 +37,12 @@ def port() -> int:
 
 @pytest.mark.parametrize("assets_url", [None, "https://assets.example.invalid"])
 async def test_real_three_process_chain(tmp_path: Path, assets_url: str | None):
+    external = os.environ.get('EIDOLON_STAGE_CHAIN')
+    if external:
+        if assets_url is not None:
+            pytest.skip('external stage instance has a fixed no-assets release')
+        await run_chain(Path(external), None)
+        return
     with tempfile.TemporaryDirectory(dir=tmp_path) as temporary:
         try:
             await run_chain(Path(temporary), assets_url)
@@ -53,20 +59,26 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
         pytest.skip("set EIDOLON_NEXT_SERVER and EIDOLON_CORE_BINARY for three-process production acceptance")
     snapshot, display = tmp_path / "content.json", tmp_path / "display.json"
     import secrets
+    external = os.environ.get('EIDOLON_STAGE_CHAIN')
     token = tmp_path / "core-token"
-    token.write_text(secrets.token_hex(32))
+    if not external:
+        token.write_text(secrets.token_hex(32))
     token.chmod(0o600)
     create_token = tmp_path / "create-token"
-    create_token.write_text(secrets.token_hex(32))
+    if not external:
+        create_token.write_text(secrets.token_hex(32))
     create_token.chmod(0o600)
     panel_token = tmp_path / "panel-token"
-    panel_token.write_text(secrets.token_hex(32))
+    if not external:
+        panel_token.write_text(secrets.token_hex(32))
     panel_token.chmod(0o600)
-    result = export(CONFIG, snapshot, with_gifts=True)
-    assert result.returncode == 0, result.stderr.decode()
-    publish(snapshot, CONFIG, assets_url, display)
+    if not external:
+        result = export(CONFIG, snapshot, with_gifts=True)
+        assert result.returncode == 0, result.stderr.decode()
+        publish(snapshot, CONFIG, assets_url, display)
     processes = []
     logs = []
+    backend = None
 
     async def spawn(name, *command, env=None):
         log = (tmp_path / f"{name}.log").open("wb")
@@ -76,32 +88,39 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
         return process
 
     try:
-        backend = await spawn("python", sys.executable, "-m", "tests.three_process_backend",
+        if external:
+            info = json.loads((tmp_path / 'backend.json').read_text())
+            endpoints = json.loads((tmp_path / 'endpoints.json').read_text())
+            python_url, go_url, next_url = (endpoints[k] for k in ('python', 'go', 'next'))
+            await ready(next_url + '/api/works')
+            print('TOPOLOGY external separately limited roles', endpoints)
+        else:
+            backend = await spawn("python", sys.executable, "-m", "tests.three_process_backend",
                               str(tmp_path), str(snapshot), str(display), json.dumps(assets_url))
-        async with asyncio.timeout(15):
-            while not (tmp_path / "backend.json").exists():
-                assert backend.returncode is None, (tmp_path / "python.log").read_text()
-                await asyncio.sleep(0.05)
-        info = json.loads((tmp_path / "backend.json").read_text())
-        python_url = f"http://127.0.0.1:{info['port']}"
-        await ready(python_url + "/api/characters")
-        go_port, next_port = port(), port()
-        go_url, next_url = f"http://127.0.0.1:{go_port}", f"http://127.0.0.1:{next_port}"
-        core = await spawn("go", binary, "-listen", f"127.0.0.1:{go_port}", "-legacy", python_url,
+            async with asyncio.timeout(15):
+                while not (tmp_path / "backend.json").exists():
+                    assert backend.returncode is None, (tmp_path / "python.log").read_text()
+                    await asyncio.sleep(0.05)
+            info = json.loads((tmp_path / "backend.json").read_text())
+            python_url = f"http://127.0.0.1:{info['port']}"
+            await ready(python_url + "/api/characters")
+            go_port, next_port = port(), port()
+            go_url, next_url = f"http://127.0.0.1:{go_port}", f"http://127.0.0.1:{next_port}"
+            core = await spawn("go", binary, "-listen", f"127.0.0.1:{go_port}", "-legacy", python_url,
                            "-packs", f"{ROOT}/core/packs,{ROOT}/core/testdata/packs",
                            "-content-snapshot", str(snapshot), "-catalog-display", str(display),
                            "-affinity-token-file", str(token), "-stats-token-file", str(token),
                            "-timeline-token-file", str(token), "-summaries-token-file", str(token),
                            "-sc-create-token-file", str(create_token), "-achievements-token-file", str(token),
                            "-gifts-panel-token-file", str(panel_token))
-        await ready(go_url + "/api/works")
-        next_process = await spawn("next", "node", next_server, env={
+            await ready(go_url + "/api/works")
+            next_process = await spawn("next", "node", next_server, env={
             **os.environ, "PORT": str(next_port), "HOSTNAME": "127.0.0.1", "BACKEND_URL": go_url,
         })
-        await ready(next_url + "/api/works")
-        assert len({backend.pid, core.pid, next_process.pid, os.getpid()}) == 4
-        assert info["pid"] == backend.pid
-        print(f"TOPOLOGY Next pid={next_process.pid} -> Go pid={core.pid} -> Uvicorn pid={backend.pid}; SQLite temporary")
+            await ready(next_url + "/api/works")
+            assert len({backend.pid, core.pid, next_process.pid, os.getpid()}) == 4
+            assert info["pid"] == backend.pid
+            print(f"TOPOLOGY Next pid={next_process.pid} -> Go pid={core.pid} -> Uvicorn pid={backend.pid}; SQLite temporary")
         async with httpx.AsyncClient(base_url=next_url, headers={"Origin": "http://localhost"}, trust_env=False) as client:
             direct = await client.get(python_url + "/api/characters")
             proxied = await client.get("/api/characters")
@@ -124,7 +143,13 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             cookies = callback.headers.get_list("set-cookie")
             assert len(cookies) >= 2, cookies
             assert any("eidolon_session=" in cookie and "HttpOnly" in cookie for cookie in cookies)
+            if external:
+                # The test oracle deliberately crosses service DNS names; browser cookies
+                # remain scoped to Next in production. Copy this synthetic test session only.
+                client.cookies = dict(client.cookies)
             assert (await client.post("/api/account/consent", json={"agree_to_terms": True, "at_least_13": True})).status_code == 204
+            if external:
+                (tmp_path / 'session-cookies.json').write_text(json.dumps(dict(client.cookies)))
             from tests.test_sc_play_scope import gameplay_snapshot
             achievement_path = '/api/characters/mano/achievements'
             before_achievement_read = gameplay_snapshot(tmp_path / 'test.db')
@@ -178,7 +203,8 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
                 assert summary.status_code == direct_summary.status_code == 200, (route, summary.text)
                 assert summary.json() == direct_summary.json(), (route, summary.text, direct_summary.text)
             print('PASS Go native conversation list/latest summaries through Next')
-            created = await client.post('/api/conversations', json={'character_id':'mano'}, headers={'Origin':next_url})
+            created = await client.post('/api/conversations', json={'character_id':'mano'},
+                                        headers={'Origin': 'http://localhost' if external else next_url})
             assert created.status_code == 201, created.text
             assert set(created.json()) == {'id','user_id','character_id','created_at','title'}
             assert (await client.get('/api/conversations/'+created.json()['id']+'/messages')).json() == []
@@ -319,11 +345,14 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert any(q['path'] == '/api/_core/sc-conversation-create/prepare' for q in observed), 'Go did not prepare creation'
             assert any(q['path'] == '/api/_core/sc-conversation-create/execute' for q in observed), 'Go did not execute creation'
             # Stop Python and prove the complete scoped catalog remains native to Go.
-            backend.terminate()
-            await asyncio.wait_for(backend.wait(), 10)
-            offline = await client.get("/api/works/sc/characters")
-            assert offline.json() == native.json()
-            print("PASS three-process catalog/chat/auth/history/cancellation; complete catalog survives Python stop")
+            if not external:
+                assert backend is not None
+                backend.terminate()
+                await asyncio.wait_for(backend.wait(), 10)
+                offline = await client.get("/api/works/sc/characters")
+                assert offline.json() == native.json()
+            print('PASS three-process catalog/chat/auth/history/cancellation' +
+                  ('; external Python retained for subsequent measurement' if external else '; complete catalog survives Python stop'))
     finally:
         for process in reversed(processes):
             if process.returncode is None:

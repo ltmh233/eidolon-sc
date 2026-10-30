@@ -6,7 +6,7 @@ import logging
 import socket
 import sqlite3
 import time
-from typing import Any
+from typing import Any, Callable
 
 import uvicorn
 import pytest
@@ -67,10 +67,12 @@ class Wire:
         self.reader, self.writer, self.buffer = reader, writer, b''
         self.status, self.headers = 0, b''
         self.request_ended = False
+        self.record_sizes = {}
+        self.on_record: Callable[[Any, int], None] | None = None
 
     @classmethod
-    async def open(cls, port, client, *, token=TOKEN, headers=()):
-        reader, writer = await asyncio.open_connection('127.0.0.1', port)
+    async def open(cls, port, client, *, token=TOKEN, headers=(), host='127.0.0.1'):
+        reader, writer = await asyncio.open_connection(host, port)
         wire = cls(reader, writer)
         cookie = '; '.join(f'{c.name}={c.value}' for c in client.cookies.jar)
         data = (f'GET /api/_core/sc-gifts-panel HTTP/1.1\r\nHost: localhost\r\n'
@@ -107,7 +109,14 @@ class Wire:
                 self.buffer += await self.reader.readexactly(size)
                 assert await self.reader.readexactly(2) == b'\r\n'
             line, self.buffer = self.buffer.split(b'\n', 1)
-            return json.loads(line)
+            row = json.loads(line)
+            if isinstance(row, list) and row and isinstance(row[0], str):
+                counts = self.record_sizes.setdefault(row[0], [0, 0])
+                counts[0] += 1
+                counts[1] += len(line) + 1
+            if self.on_record is not None:
+                self.on_record(row, len(line) + 1)
+            return row
 
     async def phase(self):
         rows = []
