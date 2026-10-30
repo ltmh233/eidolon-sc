@@ -59,6 +59,9 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
     create_token = tmp_path / "create-token"
     create_token.write_text(secrets.token_hex(32))
     create_token.chmod(0o600)
+    panel_token = tmp_path / "panel-token"
+    panel_token.write_text(secrets.token_hex(32))
+    panel_token.chmod(0o600)
     result = export(CONFIG, snapshot, with_gifts=True)
     assert result.returncode == 0, result.stderr.decode()
     publish(snapshot, CONFIG, assets_url, display)
@@ -89,7 +92,8 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
                            "-content-snapshot", str(snapshot), "-catalog-display", str(display),
                            "-affinity-token-file", str(token), "-stats-token-file", str(token),
                            "-timeline-token-file", str(token), "-summaries-token-file", str(token),
-                           "-sc-create-token-file", str(create_token), "-achievements-token-file", str(token))
+                           "-sc-create-token-file", str(create_token), "-achievements-token-file", str(token),
+                           "-gifts-panel-token-file", str(panel_token))
         await ready(go_url + "/api/works")
         next_process = await spawn("next", "node", next_server, env={
             **os.environ, "PORT": str(next_port), "HOSTNAME": "127.0.0.1", "BACKEND_URL": go_url,
@@ -135,6 +139,23 @@ async def run_chain(tmp_path: Path, assets_url: str | None):
             assert gameplay_snapshot(tmp_path / 'test.db') == before_achievement_read
             assert (await client.get('/api/_core/achievements/mano')).status_code == 404
             print('PASS native SC character achievement full response through fixed Next; no reward/read writes')
+            from tests.test_go_gifts_panel import restore_business
+            before_panel = gameplay_snapshot(tmp_path / 'test.db')
+            direct_panel = await client.get(python_url + '/api/gifts')
+            after_panel = gameplay_snapshot(tmp_path / 'test.db')
+            restore_business(tmp_path / 'test.db', before_panel)
+            native_panel = await client.get('/api/gifts')
+            assert native_panel.status_code == direct_panel.status_code == 200, native_panel.text
+            assert native_panel.json() == direct_panel.json()
+            assert set(native_panel.json()) == {'open', 'draws', 'max_draws', 'backpack', 'reset_cards',
+                                                'next_draw_at', 'resettable', 'characters', 'rewarded_at',
+                                                'daily_tasks', 'achievements'}
+            assert gameplay_snapshot(tmp_path / 'test.db') == after_panel
+            assert (await client.get('/api/_core/sc-gifts-panel')).status_code == 404
+            panel_requests = [json.loads(line) for line in (tmp_path / 'requests.jsonl').read_text().splitlines()
+                              if json.loads(line)['path'] == '/api/_core/sc-gifts-panel']
+            assert len(panel_requests) == 1, panel_requests
+            print('PASS native complete SC gifts panel through fixed Next; identical 14-table effects from restored prestate; one private dialog')
             affinity_path = "/api/characters/mano/affinity"
             computed = await client.get(affinity_path)
             direct_affinity = await client.get(python_url + affinity_path)

@@ -82,11 +82,15 @@ def _read(db: sqlite3.Connection, user: str, character: str) -> tuple[list, list
     normalized = []
     # Like the old _unlocked, parse every old row before any progress is shown.
     for key, stage, value in stages:
-        parsed = datetime.fromisoformat(value)
-        iso = parsed.isoformat()
-        order = comparison_order(iso)
-        normalized.append(['stage', _scalar(key), _scalar(stage), [iso, order['aware'], str(order['micros'])]])
+        normalized.append(_stage(key, stage, value))
     return [['count', _scalar(k), _scalar(v)] for k, v in counts], normalized
+
+
+def _stage(key: object, stage: object, value) -> list:
+    parsed = datetime.fromisoformat(value)
+    iso = parsed.isoformat()
+    order = comparison_order(iso)
+    return ['stage', _scalar(key), _scalar(stage), [iso, order['aware'], str(order['micros'])]]
 
 
 def add_achievement_snapshot(app: FastAPI, backend: Backend) -> None:

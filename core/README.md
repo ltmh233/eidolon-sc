@@ -129,6 +129,16 @@ The legacy reverse proxy enables HTTP/1 full duplex before forwarding: an early 
 
 ### Optional Go SC character achievements
 
-`-achievements-token-file` enables native computation of the complete `GET /api/characters/{id}/achievements` response using the existing core read credential and real user Cookie. Python supplies current ordered rules, raw SQL scalars and parsed stage timestamps over the dedicated authenticated `/api/_core/achievements/{id}` stream. Go owns progress conversion, tier indexing, stage coverage, conditional completion time and the historical completion-marker card display. All unlock/reward/ledger transactions and the gifts panel remain Python-owned; this does not open DLC achievement storage.
+`-achievements-token-file` enables native computation of the complete `GET /api/characters/{id}/achievements` response using the existing core read credential and real user Cookie. Python supplies current ordered rules, raw SQL scalars and parsed stage timestamps over the dedicated authenticated `/api/_core/achievements/{id}` stream. Go owns progress conversion, tier indexing, stage coverage, conditional completion time and the historical completion-marker card display. All unlock/reward/ledger transactions remain Python-owned; this does not open DLC achievement storage.
 
 Deploy Python first; absent flags retain the public proxy path. Configured failures never retry or fall back; old Python returns generic 502. The complete stream is validated in memory through end/EOF before publishing. The credential must remain distinct from the SC creation credential. See [character achievement acceptance](../docs/migration/go-character-achievements.md) for the numeric/date profile, errors, memory limits and rollback boundaries.
+
+### Optional Go SC gifts panel
+
+`-gifts-panel-token-file` enables the complete `GET /api/gifts` projection. Configure Python's `EIDOLON_CORE_GIFTS_PANEL_TOKEN_FILE` with the same owner-only regular file containing 64 lowercase hexadecimal characters. Its contents must differ from every configured core read and SC creation credential, even when the file paths differ. This flag is absent by default.
+
+Go computes daily task truncation/completion, global achievement aggregation and presentation. Python authenticates the original user once, reads raw facts in the original phases, and calls the existing `Gifts.state` and `GiftState.shown` once. Notice, daily replenishment, inventory, dynamic affinity and every reward transaction retain their original Python owners. This capability serves SC only and adds no public route or DLC economy.
+
+Deploy Python first, then enable the flag. Disable it before rolling Python back. The private `/api/_core/sc-gifts-panel` conversation requires a direct HTTP/1.1 connection with simultaneous chunked request and response streams; buffering proxies, HTTP/2 and multiple Python workers are unsupported. No retries, probes, redirects or legacy fallback occur when enabled. State may already have committed when a connection fails; a 502 does not authorize automatic replay. The stream validates its exact end and EOF before publishing any public response. Each Python process admits eight active conversations, with a ten-second control idle deadline and sixty-second absolute deadline.
+
+See [gifts panel acceptance](../docs/migration/go-gifts-panel.md) for preserved early/late failures, Cookie rules, serialization and verification limits.

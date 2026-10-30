@@ -40,6 +40,10 @@ func Handler(r *Registry, upstream *url.URL, transport http.RoundTripper, readMo
 			}
 			// Optional native reads: affinity, statistics, history, then summaries. Existing callers
 			// without these handlers retain the explicit legacy proxy mode.
+			if q.URL.Path == "/api/gifts" && q.Method == "GET" && len(readModels) > 6 && readModels[6] != nil {
+				readModels[6].ServeHTTP(w, q)
+				return
+			}
 			if (q.URL.Path == "/api/conversations" || q.URL.Path == "/api/conversations/latest") && q.Method == "GET" && len(readModels) > 3 && readModels[3] != nil {
 				readModels[3].ServeHTTP(w, q)
 				return

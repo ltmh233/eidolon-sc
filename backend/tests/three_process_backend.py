@@ -52,6 +52,7 @@ async def run(directory: Path, snapshot: Path, display: Path, assets_url: str | 
         admins=frozenset({("github", "1001")}), affinity_and_gifts=True,
         core_sc_create_token_path=(directory / "create-token") if (directory / "create-token").exists() else None,
         core_service_token_path=(directory / "core-token") if (directory / "core-token").exists() else None,
+        core_gifts_panel_token_path=(directory / "panel-token") if (directory / "panel-token").exists() else None,
     )
     history(settings.database_path)
     with sqlite3.connect(settings.database_path) as db:

@@ -18,6 +18,7 @@ import (
 	"eidolon/core/internal/affinity"
 	"eidolon/core/internal/catalog"
 	"eidolon/core/internal/conversationcreate"
+	"eidolon/core/internal/giftspanel"
 	"eidolon/core/internal/stats"
 	"eidolon/core/internal/timeline"
 )
@@ -31,6 +32,7 @@ func main() {
 	timelineToken := flag.String("timeline-token-file", "", "owner-only core service credential file; enables Go history projection")
 	summaryToken := flag.String("summaries-token-file", "", "owner-only core service credential file; enables Go conversation summaries")
 	achievementToken := flag.String("achievements-token-file", "", "owner-only core service credential; enables Go SC character achievement reads")
+	panelToken := flag.String("gifts-panel-token-file", "", "separate owner-only credential; enables the SC gifts panel dialog")
 	createToken := flag.String("sc-create-token-file", "", "separate owner-only SC creation credential; requires v3 content-snapshot")
 	scWorld := flag.String("sc-world", "", "reviewed SC world.json for offline export")
 	export := flag.String("export-worlds", "", "write private world snapshot atomically, then exit (no listener)")
@@ -150,7 +152,27 @@ func main() {
 			log.Fatal(err)
 		}
 	}
-	server := &http.Server{Addr: *listen, Handler: catalog.Handler(registry, upstream, transport, affinityRead, statsRead, timelineRead, summaryRead, createCommand, achievementRead), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	var panel http.Handler
+	if *panelToken != "" {
+		token, err := affinity.ReadTokenFile(*panelToken)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, path := range []string{*affinityToken, *statsToken, *timelineToken, *summaryToken, *achievementToken, *createToken} {
+			if path == "" {
+				continue
+			}
+			other, err := affinity.ReadTokenFile(path)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if other == token {
+				log.Fatal("SC gifts panel, read and create credentials must be distinct")
+			}
+		}
+		panel = giftspanel.NewHandler(upstream, transport, token)
+	}
+	server := &http.Server{Addr: *listen, Handler: catalog.Handler(registry, upstream, transport, affinityRead, statsRead, timelineRead, summaryRead, createCommand, achievementRead, panel), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	stopped := make(chan struct{})
